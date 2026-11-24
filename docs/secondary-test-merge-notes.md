@@ -33,6 +33,7 @@ Check after any merge that these are still there:
 |--------|--------|-------|----------|
 | Title-memory lock is by range | one lock for all memory | per range | Benchmark `reads_beside_a_remapping`: 1,000 reads waited 18.5 s with the lock on all memory, 44 us on their own. In the last run before this, 2,028 of 2,093 ms a frame of "textures" was this wait |
 | Streamed writes use one view per section | map, commit and unmap per request | mapped once | Benchmark `streamed_writes_into_pages`, 64 KiB into resident pages: 18.4 to 2.0 us (1 thread), 332 to 28 us (24 threads) |
+| Texture staging buffers are reused | one made, zeroed and freed per upload (83,000 in one run) | kept by size, 512 MB at most; zeroed if the texture brings nothing | Benchmark `upload_costs` on an RTX 5080: 341 to 2 us (64 KiB), 674 to 20 us (512 KiB), 1,349 to 72 us (2 MiB). Test fails without the zeroing |
 | Streaming buffers kept per worker | a fresh zeroed buffer per request | reused | Unit tests only; not timed on its own |
 | Shader cache keyed on the translator | BLAKE3 of the executable: every rebuild translated everything again | a hash of `victory-shader`'s sources, its switches and the host limits | Unit tests. Also closes a hole: three switches, the view-heap limit and the wave size were not in the old key |
 | Shaders that do not translate are kept | refused again at every launch | read back | Unit test |

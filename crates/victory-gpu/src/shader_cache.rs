@@ -11,47 +11,16 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use victory_pipeline::{Cache, Converter};
-use victory_shader::emit::{HostShader, StaticSampler, TranslateOptions, UserData, Wave64Mode};
+use victory_shader::emit::{HostShader, StaticSampler, UserData};
+use victory_shader::resource::RootIndexedView;
 use victory_shader::{HwStage, RootType};
 
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
-static WAVE64_MODE: AtomicU8 = AtomicU8::new(0);
-
-fn mode_byte(mode: Wave64Mode) -> u8 {
-    match mode {
-        Wave64Mode::Native => 0,
-        Wave64Mode::Wave32 => 1,
-        Wave64Mode::Emulate => 2,
-    }
-}
-
-/// Records the host device's preferred Wave64 compute lowering strategy.
-#[cfg(windows)]
-pub(crate) fn set_wave64_mode(mode: Wave64Mode) {
-    WAVE64_MODE.store(mode_byte(mode), Ordering::Relaxed);
-}
-
-fn effective_wave64_mode() -> Wave64Mode {
-    if let Ok(v) = std::env::var("VICTORY_WAVE64_EMULATE") {
-        match v.trim().to_ascii_lowercase().as_str() {
-            "0" | "native" => return Wave64Mode::Native,
-            "wave32" | "32" => return Wave64Mode::Wave32,
-            "1" | "emulate" | "force" => return Wave64Mode::Emulate,
-            "" | "auto" => {}
-            other => tracing::warn!(value = other, "unknown VICTORY_WAVE64_EMULATE; using auto"),
-        }
-    }
-    match WAVE64_MODE.load(Ordering::Relaxed) {
-        1 => Wave64Mode::Wave32,
-        2 => Wave64Mode::Emulate,
-        _ => Wave64Mode::Native,
-    }
-}
 
 /// Keeps translated shaders in `dir` from now on.
 pub fn use_shader_cache(dir: PathBuf) {
@@ -85,6 +54,27 @@ fn build() -> &'static [u8; 32] {
         match exe {
             Ok(mut bytes) => {
                 bytes.extend_from_slice(&limit.to_le_bytes());
+                // Which group barriers wait is part of the translation too.
+                bytes.push(victory_shader::emit::group_sync());
+                // So are the switches that pick the form of a wave64 program:
+                // without them here a run with `VICTORY_WAVE_WIDE=0` was
+                // served the translations an earlier run of the same
+                // executable had cached with the switch unset.
+                for name in [
+                    "VICTORY_WAVE_WIDE",
+                    "VICTORY_WAVE_DEEP_SKIPS",
+                    "VICTORY_WAVE_OWN_BITS",
+                    "VICTORY_F16_NEAREST",
+                ] {
+                    bytes.extend_from_slice(name.as_bytes());
+                    bytes.push(b'=');
+                    if let Some(value) = std::env::var_os(name) {
+                        bytes.extend_from_slice(value.as_encoded_bytes());
+                    }
+                    bytes.push(0);
+                }
+                // And which clean-up passes ran over the translated code.
+                bytes.extend_from_slice(&victory_shader::emit::shader_opt().to_le_bytes());
                 *blake3::hash(&bytes).as_bytes()
             }
             Err(e) => {
@@ -102,18 +92,15 @@ fn build() -> &'static [u8; 32] {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let wave64 = effective_wave64_mode();
-    let options = TranslateOptions { wave64 };
-    let translate =
-        |c: &[u8]| victory_shader::emit::translate_with(c, options).map_err(|e| e.to_string());
+    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
-        Some(cache) => cached(cache, build(), wave64, container, translate),
+        Some(cache) => cached(cache, build(), container, translate),
         None => translate(container),
     }
 }
 
-/// The cache entry's converter: the build, the lowering mode and the
-/// container in, the encoded translation out. `ran` tells a miss from a hit.
+/// The cache entry's converter: the build and the container in, the
+/// encoded translation out. `ran` tells a miss from a hit.
 struct Translate<F> {
     translate: F,
     ran: AtomicBool,
@@ -129,7 +116,7 @@ impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Tra
     }
     fn convert(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
         self.ran.store(true, Ordering::Relaxed);
-        let shader = (self.translate)(&input[33..]).map_err(anyhow::Error::msg)?;
+        let shader = (self.translate)(&input[32..]).map_err(anyhow::Error::msg)?;
         Ok(encode(&shader))
     }
 }
@@ -137,12 +124,10 @@ impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Tra
 fn cached(
     cache: &Cache,
     build: &[u8; 32],
-    mode: Wave64Mode,
     container: &[u8],
     translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
 ) -> Result<HostShader, String> {
-    let mb = [mode_byte(mode)];
-    let input = [&build[..], &mb[..], container].concat();
+    let input = [&build[..], container].concat();
     let converter = Translate {
         translate,
         ran: AtomicBool::new(false),
@@ -168,7 +153,7 @@ fn cached(
     (converter.translate)(container)
 }
 
-const MAGIC: &[u8; 4] = b"VSH4";
+const MAGIC: &[u8; 4] = b"VSH1";
 const STAGES: [HwStage; 8] = [
     HwStage::Ls,
     HwStage::Hs,
@@ -247,7 +232,18 @@ fn encode(s: &HostShader) -> Vec<u8> {
         word(&mut out, slots.len() as u32);
         out.extend(slots);
     }
-    word(&mut out, u32::from(s.stride_table));
+    word(&mut out, s.root_indexed_views.len() as u32);
+    for view in &s.root_indexed_views {
+        for value in [
+            u32::from(view.table_slot),
+            u32::from(view.constant_slot),
+            view.constant_dword,
+            view.byte_offset,
+            u32::from(view.shift),
+        ] {
+            word(&mut out, value);
+        }
+    }
     out
 }
 
@@ -305,7 +301,17 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
     let root_cbvs = r.list()?;
     let root_srvs = r.list()?;
     let root_uavs = r.list()?;
-    let stride_table = r.word()? != 0;
+    let n = r.word()? as usize;
+    let mut root_indexed_views = Vec::with_capacity(n.min(256));
+    for _ in 0..n {
+        root_indexed_views.push(RootIndexedView {
+            table_slot: u8::try_from(r.word()?).ok()?,
+            constant_slot: u8::try_from(r.word()?).ok()?,
+            constant_dword: r.word()?,
+            byte_offset: r.word()?,
+            shift: u8::try_from(r.word()?).ok().filter(|&s| s < 32)?,
+        });
+    }
     r.0.is_empty().then_some(HostShader {
         stage,
         dxil,
@@ -314,8 +320,8 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
         static_samplers,
         root_cbvs,
         root_srvs,
-        stride_table,
         root_uavs,
+        root_indexed_views,
     })
 }
 
@@ -342,8 +348,14 @@ mod tests {
             ])],
             root_cbvs: vec![2],
             root_srvs: vec![0, 3],
-            stride_table: true,
             root_uavs: vec![1],
+            root_indexed_views: vec![RootIndexedView {
+                table_slot: 1,
+                constant_slot: 2,
+                constant_dword: 3,
+                byte_offset: 32,
+                shift: 5,
+            }],
         }
     }
 
@@ -358,48 +370,26 @@ mod tests {
             runs.fetch_add(1, Ordering::Relaxed);
             Ok(shader())
         };
-        assert_eq!(
-            cached(&cache, &build, Wave64Mode::Native, container, translate),
-            Ok(shader())
-        );
-        assert_eq!(
-            cached(&cache, &build, Wave64Mode::Native, container, translate),
-            Ok(shader())
-        );
+        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
+        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
         assert_eq!(runs.load(Ordering::Relaxed), 1, "the second came from disk");
 
-        // Another Wave64 mode translates separately.
-        assert_eq!(
-            cached(&cache, &build, Wave64Mode::Wave32, container, translate),
-            Ok(shader())
-        );
-        assert_eq!(runs.load(Ordering::Relaxed), 2);
-
         // Another build translates again.
-        assert_eq!(
-            cached(&cache, &[8; 32], Wave64Mode::Native, container, translate),
-            Ok(shader())
-        );
-        assert_eq!(runs.load(Ordering::Relaxed), 3);
+        assert_eq!(cached(&cache, &[8; 32], container, translate), Ok(shader()));
+        assert_eq!(runs.load(Ordering::Relaxed), 2);
 
         // A damaged entry is a miss, translated and stored again.
         for e in walk(dir.path()) {
             std::fs::write(e, b"VSH1 broken").unwrap();
         }
-        assert_eq!(
-            cached(&cache, &build, Wave64Mode::Native, container, translate),
-            Ok(shader())
-        );
-        assert_eq!(runs.load(Ordering::Relaxed), 4);
-        assert_eq!(
-            cached(&cache, &build, Wave64Mode::Native, container, translate),
-            Ok(shader())
-        );
-        assert_eq!(runs.load(Ordering::Relaxed), 4);
+        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
+        assert_eq!(runs.load(Ordering::Relaxed), 3);
+        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
+        assert_eq!(runs.load(Ordering::Relaxed), 3);
 
         // Failures are not stored.
         let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
-        assert!(cached(&cache, &build, Wave64Mode::Native, b"other", fail).is_err());
+        assert!(cached(&cache, &build, b"other", fail).is_err());
     }
 
     fn walk(dir: &std::path::Path) -> Vec<PathBuf> {

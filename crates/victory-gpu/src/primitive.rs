@@ -12,11 +12,11 @@
 //! components past the end of the vertex (an element that reaches into the
 //! next one, which the layout allows).
 //!
-//! A rectangle list whose vertex shader reads no vertex buffer (it places
-//! the corners by vertex number, as the title's tiled lighting does) has
-//! nothing to expand. Its pipeline gets a geometry stage of ours instead
-//! (`pipeline::host`), which makes the fourth vertex from the vertex
-//! shader's outputs, and its draws keep the title's vertex counts.
+//! A pipeline the title makes for rectangles completes them on the GPU
+//! instead, in a geometry stage (`victory_shader::emit::rect_list_gs`):
+//! from the vertex shader's outputs, whichever vertex the corner is, for
+//! direct, indexed and indirect draws alike. This expansion is what is
+//! left for a pipeline that could not get that stage.
 
 /// Expands `rects` rectangles of `stride`-byte vertices from `src` into six
 /// vertices each in `dst`: `(v0, v1, v2)` and `(v0, v2, v3)`, so both

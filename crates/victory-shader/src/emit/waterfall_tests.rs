@@ -69,7 +69,6 @@ fn build(words: &[u32], buffers: bool) -> HostShader {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
-        options: super::TranslateOptions::default(),
     })
     .expect("lower");
     // One access with each lane's own heap index, no wave operation.
@@ -83,8 +82,8 @@ fn build(words: &[u32], buffers: bool) -> HostShader {
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
-        stride_table: lowered.stride_table,
         root_uavs: lowered.root_uavs,
+        root_indexed_views: Vec::new(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone())
@@ -127,11 +126,8 @@ fn run(shader: &HostShader, views: &[View]) -> Vec<(&'static str, Vec<u32>)> {
         // Both tables start at heap index 0.
         let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
         for u in &shader.user_data {
-            ud[u.index as usize] = match u.root {
-                RootType::Table => 0,
-                root => super::host::guard(root, views.len(), samplers.len())
-                    .unwrap_or_else(|| panic!("unexpected user data {u:?}")),
-            };
+            assert_eq!(u.root, RootType::Table, "{u:?}");
+            ud[u.index as usize] = 0;
         }
         let words = host
             .dispatch(

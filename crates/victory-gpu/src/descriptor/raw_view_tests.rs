@@ -201,9 +201,8 @@ fn dispatch(
     heap: &HostHeap,
     root: &ID3D12RootSignature,
     pso: &ID3D12PipelineState,
-    user_data: u32,
+    user_data: &[u32],
 ) -> windows::core::Result<()> {
-    let zeros = vec![0u32; user_data as usize];
     // SAFETY: an open list with every root argument set; the heap, its
     // table and the buffers its views read outlive the wait.
     unsafe {
@@ -217,7 +216,12 @@ fn dispatch(
             device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, pso)?;
         list.SetDescriptorHeaps(&[Some(heap.heap.clone())]);
         list.SetComputeRootSignature(root);
-        list.SetComputeRoot32BitConstants(0, user_data, zeros.as_ptr().cast(), 0);
+        list.SetComputeRoot32BitConstants(
+            0,
+            user_data.len() as u32,
+            user_data.as_ptr().cast(),
+            0,
+        );
         list.SetComputeRootShaderResourceView(1, heap.stride_table_gpu().expect("a table"));
         list.Dispatch(2, 1, 1);
         list.Close()?;
@@ -314,13 +318,19 @@ fn unknown_stride_reads_reach_the_bytes_of_the_view_in_the_slot() {
 
     let cs = program();
     let (root, pso) = pipeline(device, &cs).expect("a pipeline");
+    let mut user_data = vec![0; cs.user_data_dwords() as usize];
+    for entry in &cs.user_data {
+        if entry.root == RootType::ResourceHeap {
+            user_data[entry.index as usize] = heap.guard_slot();
+        }
+    }
     let run = |chosen: [u32; 2]| -> [u32; 8] {
         // SAFETY: the copies' first dwords, and the written view's 8
         // elements from byte 20.
         unsafe {
             slots_copy.cast::<[u32; 2]>().write(chosen);
             out.add(5).cast::<[u32; 8]>().write([0; 8]);
-            dispatch(device, &heap, &root, &pso, cs.user_data_dwords()).expect("a dispatch");
+            dispatch(device, &heap, &root, &pso, &user_data).expect("a dispatch");
             out.add(5).cast::<[u32; 8]>().read()
         }
     };

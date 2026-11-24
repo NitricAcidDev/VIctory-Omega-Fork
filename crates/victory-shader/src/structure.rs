@@ -345,6 +345,9 @@ pub struct Structured {
     pub reach: Vec<Bool>,
     /// The lane's bit of each lane-mask value, by its low dword's value.
     pub masks: HashMap<Value, Bool>,
+    /// Selectors used by `v_cndmask_b32`, including masks not derived from
+    /// EXEC or a VALU compare (whose lane bits are still meaningful).
+    pub selects: HashMap<Value, Bool>,
     /// Exact Wave64 pairs for checking masks at their uses.
     paired_masks: Map<Key, Bool>,
     /// Wave64 masks: low dword's value by the high dword's.
@@ -402,6 +405,8 @@ struct Lanes<'a> {
     masks: Map<Key, Bool>,
     /// Other values read as masks: constants, uniform selects, opaque ones.
     other: Map<Key, Bool>,
+    /// Values used as `v_cndmask_b32` selectors, keyed by the low dword.
+    selects: Map<Value, Bool>,
     /// For branches: SCC of a mask operation ("some lane is set") as the
     /// lane's own bit.
     scc_lane: Map<Value, Bool>,
@@ -471,6 +476,7 @@ impl<'a> Lanes<'a> {
             b: Bools::new(),
             masks: Map::default(),
             other: Map::default(),
+            selects: Map::default(),
             scc_lane: Map::default(),
             joins: Vec::new(),
             first: vec![Bool::FALSE; blocks.len()],
@@ -483,6 +489,7 @@ impl<'a> Lanes<'a> {
         self.b = Bools::new();
         self.masks.clear();
         self.other.clear();
+        self.selects.clear();
         self.scc_lane.clear();
         self.joins.clear();
         self.first.fill(Bool::FALSE);
@@ -633,6 +640,7 @@ impl<'a> Lanes<'a> {
                 .map(|&(lo, hi)| (hi, lo))
                 .collect(),
             paired_masks: if self.p.wave64 { self.masks } else { Map::default() },
+            selects: self.selects.into_iter().collect(),
             active: self.active,
             bools: self.b,
             exits,
@@ -980,7 +988,8 @@ impl<'a> Lanes<'a> {
                     && code != NULL
                     && let Some(k) = self.key(|r| inst.read(r), code)
                 {
-                    self.mask(k);
+                    let (mask, _) = self.mask(k);
+                    self.selects.insert(k.0, mask);
                 }
                 if name.starts_with("v_cmpx") {
                     if let Some(k) = self.key(|r| inst.write(r), EXEC) {
@@ -1110,6 +1119,24 @@ mod tests {
 
     fn guarded(s: &Structured) -> usize {
         s.guards.iter().flatten().filter(|g| g.is_some()).count()
+    }
+
+    #[test]
+    fn a_cndmask_selector_keeps_an_untracked_lane_mask() {
+        let p = build(
+            &[
+                0xBE80_0381, // s_mov_b32 s0, 1 (lane 0 set)
+                0xD501_0000, // v_cndmask_b32_e64 v0, 0, 1, s0
+                0x0001_0280,
+                0xBF81_0000, // s_endpgm
+            ],
+            false,
+        );
+        let s = structure(&p).unwrap();
+        let selector = p.blocks[0].insts[1].read(Reg::S(0)).unwrap();
+        let mask = *s.selects.get(&selector).expect("selector lane mask");
+        assert_eq!(s.bools.support(mask), [Atom::Constant(1)]);
+        assert!(!s.masks.contains_key(&selector));
     }
 
     #[test]

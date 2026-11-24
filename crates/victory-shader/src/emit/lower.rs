@@ -4157,7 +4157,7 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 let m = mask
-                    .and_then(|m| self.x.st.masks.get(&m).copied())
+                    .and_then(|m| self.x.st.selects.get(&m).copied())
                     .ok_or("a select on an untracked mask")?;
                 let cond = self.boolean(m, c)?;
                 if v.abs != 0 || v.neg != 0 {
@@ -6986,6 +6986,22 @@ mod tests {
             mesh_stride: 0,
         })
         .map(|_| ())
+    }
+
+    #[test]
+    fn lowers_cndmask_with_an_opaque_scalar_selector() {
+        lower_wave(
+            &[
+                0xBE80_0381, // s_mov_b32 s0, 1 (lane 0 set)
+                0xD501_0000, // v_cndmask_b32_e64 v0, 0, 1, s0
+                0x0001_0280,
+                S_ENDPGM,
+            ],
+            vec![],
+            vec![],
+            false,
+        )
+        .expect("the selector is reconstructed from its lane bit");
     }
 
     /// Lowers a compute program with the root parameters `layout` (in user

@@ -207,9 +207,9 @@ struct Lower<'a> {
     exports: HashMap<Site, &'a Export>,
     interps: HashMap<Site, &'a Interp>,
     handles: HashMap<(usize, Site, u8, bool, (u32, u32)), V>,
-    /// Element strides read from the host's table by heap slot
-    /// ([`super::shader::SLOT_STRIDES`]), by block and descriptor load.
-    strides: HashMap<(usize, Site, u8), V>,
+    /// Words read from the host's table by heap slot
+    /// ([`super::shader::slot_word`]), by block, descriptor load and binding.
+    slot_words: HashMap<(usize, Site, u8, u8), V>,
     /// Blocks splitting the edge from one IR block to another.
     edges: HashMap<(usize, usize), usize>,
     /// Per IR block: a `done` export is behind every lane entering it.
@@ -1493,7 +1493,7 @@ impl<'a> Lower<'a> {
             exports: x.io.exports.iter().map(|e| (e.site, e)).collect(),
             interps: x.io.interps.iter().map(|(s, i)| (*s, i)).collect(),
             handles: HashMap::new(),
-            strides: HashMap::new(),
+            slot_words: HashMap::new(),
             edges: HashMap::new(),
             exported: vec![false; p.blocks.len()],
             rpo: vec![usize::MAX; p.blocks.len()],
@@ -5359,6 +5359,10 @@ impl<'a> Lower<'a> {
             Some(_) => None,
         };
         if let Some(stride) = picked {
+            let raw_addr = match self.view_bias(src, None)? {
+                Some(bias) => self.s.m.bin(self.cur, Bin::Add, addr, bias),
+                None => addr,
+            };
             let zero = self.s.m.i32(0);
             let is_buffer = self.s.m.cmp(self.cur, pred::NE, stride, zero);
             let at = self.begin_guarded(Some(is_buffer));
@@ -5367,7 +5371,7 @@ impl<'a> Lower<'a> {
             for k in 0..count {
                 let b = self.cur;
                 let off = self.s.m.i32(4 * k);
-                let a = self.s.m.bin(b, Bin::Add, addr, off);
+                let a = self.s.m.bin(b, Bin::Add, raw_addr, off);
                 let mask = self.s.m.i8(1);
                 let (u, al) = (self.s.m.undef(self.s.t.i32), self.s.m.i32(4));
                 let r = self.s.op(
@@ -5401,6 +5405,9 @@ impl<'a> Lower<'a> {
             return Ok(());
         }
         if matches!(kind, Some(u) if u.kind == ResourceType::Srv) {
+            if let Some(bias) = self.view_bias(src, kind)? {
+                addr = self.s.m.bin(c, Bin::Add, addr, bias);
+            }
             let h = self.handle(site, src, false, (11, 0))?;
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
@@ -5602,14 +5609,14 @@ impl<'a> Lower<'a> {
                 };
                 ((kind | u, 0x409), Some(kind))
             }
-            Fields::Buffer { idxen, format, .. } => {
-                let stride = used.map_or(0, |u| u.stride);
+            Fields::Buffer { .. } => {
+                // Host views of buffers are raw, structured ones too: asked
+                // through a structured handle for its elements, an RTX 5080
+                // gives a raw view's dwords by its stride's dwords.
                 let props = if un.starts_with("buffer_load_format")
                     || un.starts_with("buffer_store_format")
                 {
                     (10 | u, 0x409)
-                } else if *idxen && format.is_none() && stride >= 4 && stride.is_multiple_of(4) {
-                    (12 | u, stride)
                 } else {
                     (11 | u, 0)
                 };
@@ -5682,10 +5689,23 @@ impl<'a> Lower<'a> {
             }
             None => {
                 // A raw view counts bytes; the descriptor's record count is in elements.
-                let n = field(self, 0);
+                let mut n = field(self, 0);
+                if props.0 & 0xFF == 11
+                    && let Some(bias) = self.view_bias(&src, used)?
+                {
+                    // Not below 0: a view gone null meanwhile counts 0.
+                    let n_max = self.s.op(c, "binary.i32", Attr::ReadNone, i32t, 39, &[n, bias]);
+                    n = self.s.m.bin(c, Bin::Sub, n_max, bias);
+                }
                 let stride = used.map_or(0, |u| u.stride);
                 let n = if props.0 & 0xFF == 11 && stride > 1 {
                     let k = self.s.m.i32(stride);
+                    self.s.m.bin(c, Bin::UDiv, n, k)
+                } else if props.0 & 0xFF == 11
+                    && let Some(stride) = self.slot_stride(&src)?
+                {
+                    let one = self.s.m.i32(1);
+                    let k = self.s.op(c, "binary.i32", Attr::ReadNone, i32t, 39, &[stride, one]);
                     self.s.m.bin(c, Bin::UDiv, n, k)
                 } else {
                     n
@@ -6151,28 +6171,35 @@ impl<'a> Lower<'a> {
         Ok(phi)
     }
 
-    /// The bytes per element of the buffer view `src` names, if the program
-    /// picks it from the view heap at an index it computes (root type
-    /// `ResourceHeap`): read from the host's table by heap slot in the
-    /// current block.
-    fn slot_stride(&mut self, src: &Source) -> Result<Option<V>, Why> {
-        let Source::Loaded { load, first } = src else {
-            return Ok(None);
+    /// Whether the program picks `src` from the view heap at an index it
+    /// computes (root type `ResourceHeap`).
+    fn picked(&self, src: &Source) -> bool {
+        let Source::Loaded { load, .. } = src else {
+            return false;
         };
-        let heap = self
-            .scalar
+        self.scalar
             .get(load)
             .and_then(|a| self.x.native.layout.get(a.param))
-            .is_some_and(|p| p.root == RootType::ResourceHeap);
-        if !heap {
-            return Ok(None);
+            .is_some_and(|p| p.root == RootType::ResourceHeap)
+    }
+
+    /// The dword of the host's table by heap slot for `src`
+    /// ([`super::shader::slot_word`]), through root SRV `binding`, read in
+    /// the current block.
+    fn slot_word(&mut self, src: &Source, binding: u8) -> Result<V, Why> {
+        let key = match src {
+            Source::Loaded { load, first } => Some((self.cur, *load, *first, binding)),
+            _ => None,
+        };
+        if let Some(&v) = key.and_then(|k| self.slot_words.get(&k)) {
+            return Ok(v);
         }
-        let key = (self.cur, *load, *first);
-        if let Some(&v) = self.strides.get(&key) {
-            return Ok(Some(v));
-        }
+        let slot = match src {
+            Source::Loaded { load, first } => self.heap_index(*load, *first, false)?,
+            Source::Phi { block, args } => self.descriptor_phi(*block, args, false, 8)?,
+            _ => self.lane_heap_index(src, false)?,
+        };
         let c = self.cur;
-        let slot = self.heap_index(*load, *first, false)?;
         // Inside the table whatever the index (lanes that do not run
         // compute one too): a root view has no bounds of its own.
         let last = self.s.m.i32(super::shader::SLOT_STRIDES_COUNT - 1);
@@ -6181,7 +6208,7 @@ impl<'a> Lower<'a> {
         self.s.m.tag(slot, Tag::Clamp);
         let two = self.s.m.i32(2);
         let byte = self.s.m.bin(c, Bin::Shl, slot, two);
-        let h = self.s.root_srv_handle(super::shader::SLOT_STRIDES);
+        let h = self.s.root_srv_handle(binding);
         let iu = self.s.m.undef(self.s.t.i32);
         let mask = self.s.m.i8(1);
         let align = self.s.m.i32(4);
@@ -6195,8 +6222,42 @@ impl<'a> Lower<'a> {
         );
         let f = self.s.m.extract(c, r, 0);
         let v = self.as_int(f);
-        self.strides.insert(key, v);
-        Ok(Some(v))
+        if let Some(k) = key {
+            self.slot_words.insert(k, v);
+        }
+        Ok(v)
+    }
+
+    /// The bytes per element of the buffer view `src` names, if the program
+    /// picks it from the view heap at an index it computes: read from the
+    /// host's table by heap slot in the current block.
+    fn slot_stride(&mut self, src: &Source) -> Result<Option<V>, Why> {
+        if !self.picked(src) {
+            return Ok(None);
+        }
+        let w = self.slot_word(src, super::shader::SLOT_STRIDES)?;
+        let mask = self.s.m.i32((1 << super::shader::BIAS_SHIFT) - 1);
+        Ok(Some(self.s.m.bin(self.cur, Bin::And, w, mask)))
+    }
+
+    /// The bytes by which the host's raw view of the buffer `src` names
+    /// starts before the title's view (`super::shader::slot_word`), read in
+    /// the current block; none where it cannot: what a byte offset through
+    /// the view needs added.
+    fn view_bias(&mut self, src: &Source, used: Option<&UsedResource>) -> Result<Option<V>, Why> {
+        use super::shader::{BIAS_SHIFT, SLOT_BIASES, SLOT_STRIDES, may_start_early};
+        if matches!(src, Source::Built { .. } | Source::Constant(_)) {
+            return Ok(None);
+        }
+        let w = if self.picked(src) {
+            self.slot_word(src, SLOT_STRIDES)?
+        } else if used.is_some_and(|u| u.kind != ResourceType::Cbv && may_start_early(u.stride)) {
+            self.slot_word(src, SLOT_BIASES)?
+        } else {
+            return Ok(None);
+        };
+        let shift = self.s.m.i32(BIAS_SHIFT);
+        Ok(Some(self.s.m.bin(self.cur, Bin::LShr, w, shift)))
     }
 
     /// The heap index of a descriptor that may differ between lanes,
@@ -9756,6 +9817,9 @@ impl<'a> Lower<'a> {
             let at = self.s.m.bin(c, Bin::Mul, element, k);
             off = self.s.m.bin(c, Bin::Add, at, off);
             index = None;
+        }
+        if !typed && let Some(bias) = self.view_bias(src, used)? {
+            off = self.s.m.bin(c, Bin::Add, off, bias);
         }
         if used.is_some_and(|u| u.kind == ResourceType::Cbv) && !typed {
             // A constant buffer read per lane (a dynamically indexed array).

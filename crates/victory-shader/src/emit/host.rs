@@ -15,6 +15,10 @@ use crate::dxbc::{Container, FourCC};
 
 pub struct Host {
     pub device: ID3D12Device,
+    /// The root parameter of the table of biases (`SLOT_BIASES`) in each
+    /// root signature made that has one.
+    #[cfg(test)]
+    bias_params: std::sync::Mutex<Vec<(usize, u32)>>,
 }
 
 /// What the stage declares that a pipeline must match.
@@ -119,7 +123,11 @@ impl Host {
                     sm.HighestShaderModel.0
                 ));
             }
-            Ok(Host { device })
+            Ok(Host {
+                device,
+                #[cfg(test)]
+                bias_params: Default::default(),
+            })
         }
     }
 
@@ -168,7 +176,13 @@ impl Host {
             .collect();
         views.sort_unstable();
         views.dedup();
+        #[cfg(test)]
+        let mut bias_param = None;
         for (slot, kind) in views {
+            #[cfg(test)]
+            if (slot, kind) == (super::SLOT_BIASES, 1) {
+                bias_param = Some(params.len() as u32);
+            }
             params.push(D3D12_ROOT_PARAMETER1 {
                 ParameterType: match kind {
                     1 => D3D12_ROOT_PARAMETER_TYPE_SRV,
@@ -231,7 +245,17 @@ impl Host {
                 blob.GetBufferPointer().cast::<u8>(),
                 blob.GetBufferSize(),
             );
-            self.device.CreateRootSignature(0, bytes).map_err(err)
+            let root: ID3D12RootSignature = self.device.CreateRootSignature(0, bytes).map_err(err)?;
+            #[cfg(test)]
+            {
+                use windows::core::Interface;
+                let at = root.as_raw() as usize;
+                let mut params = self.bias_params.lock().unwrap_or_else(|e| e.into_inner());
+                // Whatever was made at this address before was released.
+                params.retain(|p| p.0 != at);
+                params.extend(bias_param.map(|param| (at, param)));
+            }
+            Ok(root)
         }
     }
 
@@ -996,6 +1020,14 @@ pub enum View<'a> {
     Cbv(&'a [u32]),
     /// A buffer SRV over these dwords.
     Buffer { data: &'a [u32], stride: Stride },
+    /// A raw view of `dwords` dwords from dword `dword` of a buffer over
+    /// `data`, or (`uav`) of a zeroed unordered access buffer of its size.
+    Window {
+        data: &'a [u32],
+        dword: u32,
+        dwords: u32,
+        uav: bool,
+    },
 }
 
 /// How [`View::Buffer`] is viewed.
@@ -1019,6 +1051,59 @@ pub struct Dispatch<'a> {
     pub views: &'a [View<'a>],
     pub samplers: &'a [D3D12_SAMPLER_DESC],
     pub groups: [u32; 3],
+}
+
+#[cfg(test)]
+impl Host {
+    /// For a dispatch of a program that looks up where its views start
+    /// (`SLOT_BIASES`) and that brings no table: the table's root parameter
+    /// in `root`, and a table of zeros (every view starts where the title's
+    /// does).
+    fn zero_biases(
+        &self,
+        root: &ID3D12RootSignature,
+        bound: &[(u32, Root)],
+    ) -> Result<Option<(u32, ID3D12Resource)>, String> {
+        use windows::core::Interface;
+        let at = root.as_raw() as usize;
+        let params = self.bias_params.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&(_, param)) = params.iter().find(|p| p.0 == at) else {
+            return Ok(None);
+        };
+        if bound.iter().any(|b| b.0 == param) {
+            return Ok(None);
+        }
+        let mut table: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of an upload buffer (zeroed).
+        unsafe {
+            self.device
+                .CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_UPLOAD,
+                        ..Default::default()
+                    },
+                    D3D12_HEAP_FLAG_NONE,
+                    &D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                        Width: 1 << 16,
+                        Height: 1,
+                        DepthOrArraySize: 1,
+                        MipLevels: 1,
+                        SampleDesc: DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0,
+                        },
+                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                        ..Default::default()
+                    },
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    None,
+                    &mut table,
+                )
+                .map_err(err)?;
+        }
+        Ok(table.map(|t| (param, t)))
+    }
 }
 
 #[cfg(test)]
@@ -1309,6 +1394,52 @@ impl Host {
                         );
                         keep.push(b);
                     }
+                    View::Window { data, dword, dwords, uav } => {
+                        let bytes = data.len() as u64 * 4;
+                        if uav {
+                            let b = make(
+                                D3D12_HEAP_TYPE_DEFAULT,
+                                &buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+                                D3D12_RESOURCE_STATE_COMMON,
+                            )?;
+                            let desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                                Format: DXGI_FORMAT_R32_TYPELESS,
+                                ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                                    Buffer: D3D12_BUFFER_UAV {
+                                        FirstElement: u64::from(dword),
+                                        NumElements: dwords,
+                                        Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                                        ..Default::default()
+                                    },
+                                },
+                            };
+                            dev.CreateUnorderedAccessView(&b, None, Some(&desc), at);
+                            let rb = make(
+                                D3D12_HEAP_TYPE_READBACK,
+                                &buffer(bytes, D3D12_RESOURCE_FLAG_NONE),
+                                D3D12_RESOURCE_STATE_COPY_DEST,
+                            )?;
+                            uavs.push((b, None, data.len() as u32, rb));
+                        } else {
+                            let b = upload(data)?;
+                            let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                                Format: DXGI_FORMAT_R32_TYPELESS,
+                                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                                    Buffer: D3D12_BUFFER_SRV {
+                                        FirstElement: u64::from(dword),
+                                        NumElements: dwords,
+                                        StructureByteStride: 0,
+                                        Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                                    },
+                                },
+                            };
+                            dev.CreateShaderResourceView(&b, Some(&desc), at);
+                            keep.push(b);
+                        }
+                    }
                     View::Buffer { data, stride } => {
                         let b = upload(data)?;
                         let (format, elements, stride, flags) = match stride {
@@ -1362,6 +1493,10 @@ impl Host {
             }
             list.SetDescriptorHeaps(&[Some(views.clone()), Some(samplers.clone())]);
             list.SetComputeRootSignature(root);
+            let biases = self.zero_biases(root, &d.roots)?;
+            if let Some((param, table)) = &biases {
+                list.SetComputeRootShaderResourceView(*param, table.GetGPUVirtualAddress());
+            }
             for (param, arg) in &d.roots {
                 match arg {
                     Root::Constants(data) => list.SetComputeRoot32BitConstants(

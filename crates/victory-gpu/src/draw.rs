@@ -961,6 +961,30 @@ impl State {
                         }
                         continue;
                     }
+                    if srv && slot == victory_shader::emit::SLOT_BIASES {
+                        // Ours: where the host's views of buffers start.
+                        let heap = match self.heaps[0] {
+                            0 => None,
+                            h => crate::descriptor::heap(h as This).host(),
+                        };
+                        let Some((gpu, buffer)) =
+                            heap.and_then(|h| Some((h.strides_gpu()?, h.strides_buffer()?)))
+                        else {
+                            // Left unset, the shader would read anywhere.
+                            once!("a shader reads views from a view heap that is not set: dropped");
+                            return false;
+                        };
+                        list.keep(buffer);
+                        // SAFETY: an open list, which holds the table.
+                        unsafe {
+                            if compute {
+                                l.SetComputeRootShaderResourceView(param, gpu);
+                            } else {
+                                l.SetGraphicsRootShaderResourceView(param, gpu);
+                            }
+                        }
+                        continue;
+                    }
                     if srv && slot == victory_shader::emit::SLOT_STRIDES {
                         // Ours, not the title's: the shader picks buffers
                         // from the view heap by an index it computes.

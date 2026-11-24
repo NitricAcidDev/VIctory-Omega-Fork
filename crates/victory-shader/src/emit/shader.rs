@@ -16,7 +16,7 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 /// The root SRV `t<SLOT_STRIDES>` in [`ROOT_CBV_SPACE`] of a shader that
 /// reads buffers through descriptors it picks from the view heap at an
 /// index it computes (SM 6.6 dynamic resources): a raw buffer of
-/// [`SLOT_STRIDES_COUNT`] dwords the host keeps, dword `i` the bytes per
+/// [`SLOT_STRIDES_COUNT`] dwords the host keeps, dword `i` (a [`slot_word`]) the bytes per
 /// element of the buffer view at heap slot `i` (0: none or not a buffer).
 /// The console's descriptor holds that stride and its hardware multiplies
 /// the element index by it; the program's code does not say it, and the
@@ -26,6 +26,31 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 pub const SLOT_STRIDES: u8 = 255;
 /// Dwords of the [`SLOT_STRIDES`] buffer: heap indices are clamped to it.
 pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
+/// Dwords of the [`SLOT_STRIDES`] buffer are [`slot_word`]s: the stride in
+/// the bits below these, the view's bias in them.
+pub(crate) const BIAS_SHIFT: u32 = 28;
+/// The same buffer as [`SLOT_STRIDES`] for a shader that reads only the
+/// biases of the views its tables name (nothing of the heap needs making
+/// ready for it).
+pub const SLOT_BIASES: u8 = 252;
+
+/// The dword of the [`SLOT_STRIDES`] buffer for a buffer view of elements of
+/// `stride` bytes whose raw view of the host starts `bias` bytes (0, 4, 8 or
+/// 12) before the title's view does. Raw views start on 16 bytes, the
+/// console's views on 4; translated shaders add the bias to every byte
+/// offset through a view that may have one.
+pub const fn slot_word(stride: u32, bias: u32) -> u32 {
+    debug_assert!(bias < 16 && stride >> BIAS_SHIFT == 0);
+    stride | bias << BIAS_SHIFT
+}
+
+/// Whether a structured view of elements of `stride` bytes may start off 16
+/// bytes: the host makes it start early only then, and shaders that know
+/// the stride add the bias only then. (Buffers start on 16 bytes, so whole
+/// elements of a multiple of 16 bytes do.)
+pub const fn may_start_early(stride: u32) -> bool {
+    stride >= 4 && stride.is_multiple_of(4) && !stride.is_multiple_of(16)
+}
 
 /// Title memory by address (`resource::MEMORY`): console code reads and
 /// writes through raw 40-bit addresses it takes from root constants,

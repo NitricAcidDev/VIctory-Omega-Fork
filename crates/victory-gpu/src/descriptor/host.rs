@@ -1077,6 +1077,32 @@ impl HostHeap {
         }
     }
 
+    /// Tells shaders what slot `index` holds, made from `view`
+    /// ([`victory_shader::emit::slot_word`]).
+    fn tell(&self, index: u32, view: &View, made: bool) {
+        let Some((_, _, data)) = &self.strides else {
+            return;
+        };
+        if index >= victory_shader::emit::SLOT_STRIDES_COUNT {
+            return;
+        }
+        // A title slot keeps the stride `note_buffer` gave it without a host
+        // view too; a view that could not be made has no bias.
+        let stride = view_stride(view).unwrap_or(0);
+        let early = if made { early_by(view) } else { 0 };
+        let word = victory_shader::emit::slot_word(stride, early);
+        // SAFETY: inside the mapping, as in `note_buffer`.
+        unsafe { (*data as *mut u32).add(index as usize).write_volatile(word) };
+    }
+
+    /// Slot `index`'s word, as shaders read it.
+    #[cfg(test)]
+    fn told(&self, index: u32) -> u32 {
+        let (_, _, data) = self.strides.as_ref().expect("a view heap's table");
+        // SAFETY: inside the mapping (a small test index).
+        unsafe { (*data as *const u32).add(index as usize).read_volatile() }
+    }
+
     /// Makes slot `index` (a dynamic one) from `view`; a null view if the
     /// host cannot.
     pub(crate) fn make_at(&self, index: u32, view: &View) {
@@ -1084,6 +1110,7 @@ impl HostHeap {
         if kept.is_none() {
             null_for(view, self.cpu(index));
         }
+        self.tell(index, view, kept.is_some());
         self.keep(index, kept.flatten());
     }
 
@@ -1314,6 +1341,9 @@ impl HostHeap {
             if kept.is_none() && !self.sampler {
                 null_for(&view, self.cpu(index));
             }
+            if !later {
+                self.tell(index, &view, kept.is_some());
+            }
             self.keep(index, kept.flatten());
         }
         Some(view)
@@ -1511,15 +1541,64 @@ type Kept = Option<ID3D12Resource>;
 /// views were right there). So the host's view is raw whenever it can be:
 /// the bytes must start on 16 (the host's raw view alignment) and be whole
 /// dwords. A view that cannot stays structured.
-fn raw_window(offset: u64, first: u64, count: u32, stride: u32) -> Option<(u64, u32)> {
+///
+/// A view whose elements need not start on 16 bytes
+/// ([`victory_shader::emit::may_start_early`]) starts on the 16 before:
+/// the third value is by how many bytes, which the slot's word tells
+/// shaders to add ([`victory_shader::emit::slot_word`]). (Such a view
+/// stayed structured, and raw reads through it gave other bytes.)
+/// shortcut: a view of elements of a multiple of 16 bytes that starts off
+/// 16 (its buffer does) stays structured.
+fn raw_window(offset: u64, first: u64, count: u32, stride: u32) -> Option<(u64, u32, u32)> {
     if stride == 0 {
         return None;
     }
     let start = first.checked_mul(u64::from(stride))?.checked_add(offset)?;
+    let early = start % 16;
+    if early != 0 && (early % 4 != 0 || !victory_shader::emit::may_start_early(stride)) {
+        return None;
+    }
     let bytes = u64::from(count) * u64::from(stride);
-    (start % 16 == 0 && bytes % 4 == 0)
-        .then(|| u32::try_from(bytes / 4).ok().map(|dwords| (start / 4, dwords)))
-        .flatten()
+    if !bytes.is_multiple_of(4) {
+        return None;
+    }
+    let dwords = u32::try_from((bytes + early) / 4).ok()?;
+    Some(((start - early) / 4, dwords, early as u32))
+}
+
+/// The bytes by which the raw view [`make`] gives a structured buffer view
+/// starts before the title's view does ([`raw_window`]); 0 for other views.
+fn early_by(view: &View) -> u32 {
+    let (words, unordered): (&[u32; 10], bool) = match view {
+        View::Shader(_, Some(d)) => (d, false),
+        View::Unordered(_, _, Some(d)) => (d, true),
+        View::Placed(unordered, _, d) => match d[..10].try_into() {
+            Ok(words) => (words, *unordered),
+            Err(_) => return 0,
+        },
+        _ => return 0,
+    };
+    let Some((base, width)) = buffer_extent(view) else {
+        return 0;
+    };
+    // SAFETY: buffer views' union members.
+    let (format, first, count, stride) = unsafe {
+        if unordered {
+            let d = uav_desc(words);
+            let b = d.Anonymous.Buffer;
+            (d.Format, b.FirstElement, b.NumElements, b.StructureByteStride)
+        } else {
+            let d = srv_desc(words);
+            let b = d.Anonymous.Buffer;
+            (d.Format, b.FirstElement, b.NumElements, b.StructureByteStride)
+        }
+    };
+    if format != DXGI_FORMAT_UNKNOWN || !victory_shader::emit::may_start_early(stride) {
+        return 0;
+    }
+    crate::shadow::find(base, width)
+        .and_then(|shadow| raw_window(shadow.offset(base), first, count, stride))
+        .map_or(0, |window| window.2)
 }
 
 /// Whether the host accepts a buffer view with these fields of a buffer of
@@ -1573,7 +1652,7 @@ fn buffer_srv(
     let window = (desc.Format == DXGI_FORMAT_UNKNOWN)
         .then(|| raw_window(offset, structured.FirstElement, structured.NumElements, structured.StructureByteStride))
         .flatten();
-    if let Some((first, count)) = window {
+    if let Some((first, count, _)) = window {
         desc.Format = DXGI_FORMAT_R32_TYPELESS;
         desc.Anonymous.Buffer = D3D12_BUFFER_SRV {
             FirstElement: first,
@@ -1658,7 +1737,7 @@ fn buffer_uav(
     let window = (desc.Format == DXGI_FORMAT_UNKNOWN)
         .then(|| raw_window(offset, buffer.FirstElement, buffer.NumElements, buffer.StructureByteStride))
         .flatten();
-    if let Some((first, count)) = window {
+    if let Some((first, count, _)) = window {
         buffer.FirstElement = first;
         buffer.NumElements = count;
         buffer.StructureByteStride = 0;
@@ -2274,19 +2353,75 @@ mod tests {
         assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
     }
 
+    /// A structured view off 16 bytes of its host copy gets a raw view that
+    /// starts early, and its slot tells shaders by how much; one that cannot
+    /// be made tells none.
+    #[test]
+    fn slots_tell_how_early_their_views_start() {
+        use victory_shader::emit::slot_word;
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let heap = HostHeap::new(false, 8).expect("a view heap");
+        let memory = vec![0u8; 1 << 17];
+        let at = (memory.as_ptr() as u64).next_multiple_of(1 << 16);
+        let view = |first: u32, count: u32, stride: u32, unordered: bool| {
+            let mut resource = [0; 14];
+            (resource[0], resource[4]) = (1, 0x1000);
+            let mut desc = [0; 16];
+            desc[1] = 1;
+            if unordered {
+                (desc[2], desc[4], desc[5]) = (first, count, stride);
+            } else {
+                desc[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                (desc[4], desc[6], desc[7]) = (first, count, stride);
+            }
+            (desc[10], desc[11]) = (at as u32, (at >> 32) as u32);
+            View::Placed(unordered, resource, desc)
+        };
+        for unordered in [false, true] {
+            // (first element, stride), how early.
+            for ((first, stride), early) in [
+                ((3, 12), 4),
+                ((1, 12), 12),
+                ((1, 20), 4),
+                ((5, 4), 4),
+                ((1, 8), 8),
+                ((3, 16), 0),
+                ((4, 12), 0),
+            ] {
+                heap.make_at(1, &view(first, 5, stride, unordered));
+                assert_eq!(
+                    heap.told(1),
+                    slot_word(stride, early),
+                    "{first} of {stride}, unordered {unordered}"
+                );
+            }
+            // Past its host copy's end: refused, so no bias.
+            heap.make_at(1, &view(3, 5 << 24, 12, unordered));
+            assert_eq!(heap.told(1), slot_word(12, 0));
+        }
+        // SAFETY: a plain device query.
+        assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
+    }
+
     /// Dynamic slots stay taken until given back, and runs do not wrap.
     #[test]
     fn a_structured_view_made_raw_passes_the_host_check() {
         // 100 elements of 20 bytes from element 8, in a copy that starts 32
         // bytes before the view's memory: bytes 192..2192.
-        let (first, count) = raw_window(32, 8, 100, 20).unwrap();
-        assert_eq!((first, count), (48, 500));
+        let (first, count, early) = raw_window(32, 8, 100, 20).unwrap();
+        assert_eq!((first, count, early), (48, 500, 0));
         assert!(buffer_view_ok(DXGI_FORMAT_R32_TYPELESS, first, count, 0, true, 4096));
         // the format a raw view must name; the structured one's is refused
         assert!(!buffer_view_ok(DXGI_FORMAT_UNKNOWN, first, count, 0, true, 4096));
         // past the buffer, not on 16 bytes, no elements
         assert!(!buffer_view_ok(DXGI_FORMAT_R32_TYPELESS, first, count, 0, true, 2000));
-        assert!(raw_window(4, 0, 100, 20).is_none());
+        // Off 16 bytes: from the 16 before. Off 4, or of whole 16s: as it is.
+        assert_eq!(raw_window(4, 0, 100, 20), Some((0, 501, 4)));
+        assert_eq!(raw_window(0, 3, 10, 12), Some((8, 31, 4)));
+        assert!(raw_window(4, 0, 100, 16).is_none());
+        assert!(raw_window(2, 0, 100, 20).is_none());
         assert!(!buffer_view_ok(DXGI_FORMAT_R32_TYPELESS, 0, 0, 0, true, 4096));
         // a structured view the host takes as it is
         assert!(buffer_view_ok(DXGI_FORMAT_UNKNOWN, 1, 10, 12, false, 4096));

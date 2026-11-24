@@ -446,7 +446,23 @@ fn dump_one(
             };
             tracing::info!(?resource, depths = ?most(depths), top_bytes = ?most(tops), "24-bit depth plane values (value, texels)");
         }
-        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows) {
+        let (width, height) = (f.Width as usize, f.Height as usize);
+        if let Some([transparent, partial, opaque]) =
+            target_alpha(f.Format.0 as u32, width, height, pitch, rows)
+        {
+            tracing::info!(
+                frame,
+                ?resource,
+                width,
+                height,
+                format = f.Format.0,
+                transparent,
+                partial,
+                opaque,
+                "render target alpha texels"
+            );
+        }
+        if let Some(rgba) = to_rgba(f.Format.0 as u32, width, height, pitch, rows) {
             let name = format!(
                 "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}",
                 d.Width, d.Height, d.Format.0
@@ -539,6 +555,43 @@ fn small_float(bits: u32, man: u32) -> f32 {
         31 => f32::INFINITY,
         e => (1.0 + m / (1 << man) as f32) * 2f32.powi(e as i32 - 15),
     }
+}
+
+/// Counts texels by alpha in commonly dumped colour render targets. This
+/// reads the raw footprint because the RGB dump does not encode alpha.
+fn target_alpha(
+    format: u32,
+    width: usize,
+    height: usize,
+    pitch: usize,
+    rows: &[u8],
+) -> Option<[usize; 3]> {
+    let bytes_per_pixel = match format {
+        10 | 11 => 8, // RGBA16 float or UNORM
+        23 | 24 | 27..=29 | 87 | 90 | 91 => 4,
+        _ => return None,
+    };
+    let mut counts = [0; 3];
+    for y in 0..height {
+        let start = y * pitch;
+        for pixel in rows[start..start + width * bytes_per_pixel].chunks_exact(bytes_per_pixel) {
+            let alpha = match format {
+                10 => half(u16::from_le_bytes([pixel[6], pixel[7]])),
+                11 => f32::from(u16::from_le_bytes([pixel[6], pixel[7]])) / 65535.0,
+                23 | 24 => f32::from(pixel[3] >> 6) / 3.0,
+                _ => f32::from(pixel[3]) / 255.0,
+            };
+            let bucket = if alpha <= 0.0 {
+                0
+            } else if alpha >= 1.0 {
+                2
+            } else {
+                1
+            };
+            counts[bucket] += 1;
+        }
+    }
+    Some(counts)
 }
 
 /// Rows of a host format as 8-bit RGBA: 8-bit color as is, everything else
@@ -830,6 +883,20 @@ mod tests {
     #[test]
     fn crc_matches_the_png_check_value() {
         assert_eq!(super::crc32(b"IEND"), 0xae42_6082);
+    }
+
+    #[test]
+    fn target_alpha_respects_row_pitch_and_ignores_unused_x() {
+        let pixels = [
+            0, 0, 0, 0, 0, 0, 0, 127, 77, 77, 77, 77, // Row 1 and padding.
+            0, 0, 0, 255, 0, 0, 0, 255, // Row 2.
+        ];
+        assert_eq!(super::target_alpha(28, 2, 2, 12, &pixels), Some([1, 1, 2]));
+        assert_eq!(super::target_alpha(87, 2, 2, 12, &pixels), Some([1, 1, 2]));
+        assert_eq!(super::target_alpha(88, 2, 2, 12, &pixels), None);
+
+        let half = [0, 0, 0, 0, 0, 0, 0, 0x38]; // Half-float alpha 0.5.
+        assert_eq!(super::target_alpha(10, 1, 1, 8, &half), Some([0, 1, 0]));
     }
 
     /// R16G16B16A16_UNORM is integers, not half floats; 89 is 10:10:10:2,

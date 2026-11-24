@@ -828,6 +828,17 @@ extern "system" fn present(
         const COPY_SOURCE: u32 = 0x800;
         let state = crate::resource::host_transition(resource, COPY_SOURCE)
             .map_or(COPY_SOURCE, |(_, before)| before);
+        #[cfg(feature = "diagnostics")]
+        if crate::capture::listed(frame) {
+            tracing::info!(
+                target: "victory_gpu::capture",
+                frame,
+                planes,
+                resources = plane.count,
+                ?resource,
+                "presented plane and resource counts"
+            );
+        }
         let shown = host.present(texture, state, frame);
         crate::resource::host_transition(resource, state);
         #[cfg(feature = "diagnostics")]

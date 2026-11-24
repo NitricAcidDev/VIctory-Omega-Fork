@@ -292,15 +292,35 @@ fn next() -> Arc<Pending> {
     }
 }
 
-/// Starts the workers (half the logical processors, 2 to 8) on first use.
+/// How many workers make pipelines: two thirds of the logical processors,
+/// 2 to 16 (they run below the title's threads). With 8 on a processor of
+/// 24, the 1,450 pipelines a launch starts with took four minutes.
+/// `VICTORY_PIPELINE_WORKERS` sets the number.
+fn worker_count(processors: usize, asked: Option<&str>) -> usize {
+    match asked.and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(n) if n > 0 => n.min(64),
+        _ => (processors * 2 / 3).clamp(2, 16),
+    }
+}
+
+/// A worker's stack: some of the driver's compiles recurse past the 2 MiB a
+/// thread has by default, which ends the process (an NVIDIA driver's
+/// `nvgpucomp64.dll`, reported upstream). Only what is used is committed.
+const STACK: usize = 16 << 20;
+
+/// Starts the workers on first use.
 fn workers() -> bool {
     static RUNNING: OnceLock<bool> = OnceLock::new();
     *RUNNING.get_or_init(|| {
         let mut running = false;
-        let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
+        let asked = std::env::var("VICTORY_PIPELINE_WORKERS").ok();
+        let processors = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let workers = worker_count(processors, asked.as_deref());
+        tracing::info!(workers, processors, "host pipeline workers");
         for i in 0..workers {
             let spawned = std::thread::Builder::new()
                 .name(format!("victory-pipelines-{i}"))
+                .stack_size(STACK)
                 .spawn(|| {
                     // Below the title's own threads (loading, recording).
                     // SAFETY: a plain call on our own thread.
@@ -333,12 +353,17 @@ static PEAK: AtomicU64 = AtomicU64::new(0);
 /// The workers ran out of work: logged after a batch of 10 or more, and
 /// the cache saved (at most every 20 s).
 fn drained() {
-    use super::library::{EARLY, LOADED, MADE};
+    use super::library::{EARLY, LOADED, MADE, SPENT};
     if PEAK.swap(0, Ordering::Relaxed) >= 10 {
         tracing::info!(
             made = MADE.load(Ordering::Relaxed),
             loaded = LOADED.load(Ordering::Relaxed),
             started_early = EARLY.load(Ordering::Relaxed),
+            compiling_ms = SPENT[0].load(Ordering::Relaxed) / 1000,
+            loading_ms = SPENT[1].load(Ordering::Relaxed) / 1000,
+            translating_ms = SPENT[2].load(Ordering::Relaxed) / 1000,
+            translations_kept = crate::shader_cache::counts().0,
+            translations_made = crate::shader_cache::counts().1,
             "host pipelines all made"
         );
     }
@@ -375,6 +400,17 @@ mod tests {
         assert!(ready(&p).is_none());
         assert!(p.made.get().is_none());
         assert!(super::super::library::wanted_early(&p.key));
+    }
+
+    #[test]
+    fn most_processors_make_pipelines_unless_told() {
+        assert_eq!(worker_count(24, None), 16);
+        assert_eq!(worker_count(16, None), 10);
+        assert_eq!(worker_count(64, None), 16);
+        assert_eq!(worker_count(1, None), 2);
+        assert_eq!(worker_count(24, Some(" 5 ")), 5);
+        assert_eq!(worker_count(24, Some("0")), 16);
+        assert_eq!(worker_count(24, Some("many")), 16);
     }
 
     #[test]

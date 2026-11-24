@@ -17,7 +17,6 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
 use std::os::windows::fs::FileExt;
@@ -821,10 +820,10 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
     let source = read_source(request).map_err(|hr| fail(hr, "reading the source"))?;
     // The console's order: zlib first, then BCPack.
     let source = if bc != 0 && options & ZLIB != 0 {
-        let mut packed = vec![0; request.intermediate_size as usize];
+        let mut packed = Scratch::new(request.intermediate_size as usize);
         let n = inflate(&source, &mut packed).map_err(|hr| fail(hr, "zlib"))?;
         packed.truncate(n);
-        Cow::Owned(packed)
+        Source::Read(packed)
     } else {
         source
     };
@@ -894,18 +893,101 @@ fn load_bcpack_tables() -> Result<Tables, String> {
     Tables::parse(&bytes).map_err(|e| e.to_string())
 }
 
+/// A worker's buffer for one request, kept for its next one: a fresh one
+/// per request was a mapping, its pages' faults and their zeroing each
+/// time (Windows takes blocks this big from the system and gives them back
+/// at once). Its bytes are whatever the last request left.
+struct Scratch {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Scratch {
+    /// Buffers kept by a worker, and the bytes of the biggest kept.
+    const KEPT: usize = 3;
+    const BIGGEST: usize = 8 << 20;
+
+    fn new(len: usize) -> Scratch {
+        let mut bytes = SCRATCH.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            // The smallest that fits, else the biggest (to grow).
+            let fits = (0..kept.len())
+                .filter(|&i| kept[i].len() >= len)
+                .min_by_key(|&i| kept[i].len());
+            let any = fits.or_else(|| (0..kept.len()).max_by_key(|&i| kept[i].len()));
+            any.map(|i| kept.swap_remove(i)).unwrap_or_default()
+        });
+        if bytes.len() < len {
+            bytes.resize(len, 0);
+        }
+        Scratch { bytes, len }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Scratch {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[..self.len]
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let bytes = std::mem::take(&mut self.bytes);
+        if bytes.len() > Scratch::BIGGEST {
+            return;
+        }
+        // (A thread that is ending keeps nothing.)
+        let _ = SCRATCH.try_with(|kept| {
+            let mut kept = kept.borrow_mut();
+            if kept.len() < Scratch::KEPT {
+                kept.push(bytes);
+            }
+        });
+    }
+}
+
 /// A compressed request's source: borrowed from memory, or read from the
 /// file.
-fn read_source(request: &Request) -> Result<Cow<'static, [u8]>, HRESULT> {
+enum Source {
+    Memory(&'static [u8]),
+    Read(Scratch),
+}
+
+impl std::ops::Deref for Source {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Source::Memory(bytes) => bytes,
+            Source::Read(bytes) => bytes,
+        }
+    }
+}
+
+fn read_source(request: &Request) -> Result<Source, HRESULT> {
     let size = request.source_size as usize;
     if request.options & MEMORY_SOURCE != 0 {
         // SAFETY: the title's source holds `size` bytes until completion.
         let bytes = unsafe { std::slice::from_raw_parts(request.source.cast(), size) };
-        return Ok(Cow::Borrowed(bytes));
+        return Ok(Source::Memory(bytes));
     }
-    let mut bytes = vec![0; size];
+    let mut bytes = Scratch::new(size);
     read_into(request, &mut bytes)?;
-    Ok(Cow::Owned(bytes))
+    Ok(Source::Read(bytes))
 }
 
 /// Nanoseconds workers spent reading files, for the debug summary.
@@ -971,7 +1053,7 @@ fn into_destination(
     if let Some(mut window) = super::xmem::page_window(pages, offset, len) {
         return fill(window.bytes()).map(drop);
     }
-    let mut data = vec![0; len];
+    let mut data = Scratch::new(len);
     let n = fill(&mut data)?;
     if super::xmem::write_physical(pages, offset, &data[..n]) {
         Ok(())

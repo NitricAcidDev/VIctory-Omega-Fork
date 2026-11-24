@@ -190,6 +190,50 @@ pub fn shader_opt() -> u32 {
     *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
 }
 
+/// The switches a translation may depend on (environment variables).
+const SWITCHES: [&str; 11] = [
+    "VICTORY_F16_NEAREST",
+    "VICTORY_GROUP_SYNC",
+    "VICTORY_MESH_OUTPUT_STRICT",
+    "VICTORY_SHADER_LOOP_LIMIT",
+    "VICTORY_SHADER_OPT",
+    "VICTORY_STRICT_JOINS",
+    "VICTORY_WAVE_DEEP_SKIPS",
+    "VICTORY_WAVE_LOCAL",
+    "VICTORY_WAVE_OWN_BITS",
+    "VICTORY_WAVE_WHY",
+    "VICTORY_WAVE_WIDE",
+];
+
+/// What a translation depends on besides the container: the translator (a
+/// hash of its sources, `build.rs`), its switches and what it was told of
+/// the host. Two processes with the same id translate a container to the
+/// same bytes, so translations kept on disk outlive rebuilds of everything
+/// else. Ask after [`set_view_heap_limit`] and [`set_host_max_wave`].
+pub fn translator_id() -> Vec<u8> {
+    let mut id = env!("VICTORY_TRANSLATOR_HASH").as_bytes().to_vec();
+    for name in SWITCHES {
+        id.extend_from_slice(name.as_bytes());
+        // Unset is not the same as set to nothing.
+        match std::env::var_os(name) {
+            Some(value) => {
+                id.push(b'=');
+                id.extend_from_slice(value.as_encoded_bytes());
+            }
+            None => id.push(b'-'),
+        }
+        id.push(0);
+    }
+    // As they were understood, whatever the variables say by now.
+    id.extend_from_slice(&loop_limit().to_le_bytes());
+    id.push(group_sync());
+    id.extend_from_slice(&shader_opt().to_le_bytes());
+    id.extend_from_slice(&shader::view_heap_limit().to_le_bytes());
+    id.extend_from_slice(&lower::host_max_wave().to_le_bytes());
+    id.push(u8::from(cfg!(feature = "diagnostics")));
+    id
+}
+
 /// `VICTORY_SHADER_OPT`'s value; every pass when it is unset or
 /// unreadable. Pure, for testing.
 fn parse_shader_opt(value: Option<&str>) -> u32 {

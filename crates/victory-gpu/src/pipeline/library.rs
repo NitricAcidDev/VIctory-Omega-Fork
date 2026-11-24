@@ -67,6 +67,10 @@ pub fn use_pipeline_cache(dir: PathBuf) {
 pub(crate) static MADE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static LOADED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static EARLY: AtomicU64 = AtomicU64::new(0);
+/// Microseconds the workers spent on what, since the start: the host's
+/// compiles, loads from the library, and translating shaders (or reading
+/// translations kept).
+pub(crate) static SPENT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 /// For the memory lines: the bytes of the library's file, kept in memory
 /// while the library lives, and the bytes the last save wrote (a buffer of
 /// that size is made, filled and written every time pipelines were added,
@@ -526,6 +530,7 @@ pub(crate) fn pipeline(
     // The load read the library's file (see `trim`).
     LOADED_AT.store(crate::host::now_ms(), Ordering::Relaxed);
     TRIMMED.store(false, Ordering::Relaxed);
+    SPENT[1].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
     let refused = match loaded {
         Ok(pso) => {
             LOADED.fetch_add(1, Ordering::Relaxed);
@@ -540,7 +545,10 @@ pub(crate) fn pipeline(
     // Compiled outside any lock: compiles take up to seconds.
     let pso = {
         let _call = call("make", name);
-        create()?
+        let began = std::time::Instant::now();
+        let made = create();
+        SPENT[0].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+        made?
     };
     MADE.fetch_add(1, Ordering::Relaxed);
     crate::host::trail(|| {
@@ -562,14 +570,16 @@ pub(crate) fn pipeline(
 }
 
 /// Writes the library and the early list if pipelines were added since the
-/// last save and `SAVE_EVERY` has passed (or `now`).
+/// last save and the time between saves has passed (or `now`).
 pub(crate) fn save(now: bool) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+    // Stores wait while the library is written whole (hundreds of MB): less
+    // often while pipelines are waiting to be made.
+    let every = std::time::Duration::from_secs(if super::make::waiting() > 0 { 60 } else { 20 });
     let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
+        if !now && last.is_some_and(|t| t.elapsed() < every) {
             return;
         }
         *last = Some(std::time::Instant::now());

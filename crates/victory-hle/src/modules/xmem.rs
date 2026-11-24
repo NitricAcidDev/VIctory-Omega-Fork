@@ -10,8 +10,8 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_COMMITMENT_LIMIT, HANDLE, INVALID_HANDLE_VALUE,
@@ -348,7 +348,23 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
 
 const PAGE: usize = 64 << 10;
 
-struct Section(HANDLE);
+struct Section {
+    handle: HANDLE,
+    /// Our view of the whole of it (0: the host maps none), see `whole`.
+    view: OnceLock<usize>,
+    /// Pages known to be committed.
+    committed: Box<[AtomicBool]>,
+}
+
+impl Section {
+    fn new(handle: HANDLE, pages: usize) -> Section {
+        Section {
+            handle,
+            view: OnceLock::new(),
+            committed: (0..pages).map(|_| AtomicBool::new(false)).collect(),
+        }
+    }
+}
 
 // SAFETY: a section handle may be used from any thread.
 unsafe impl Send for Section {}
@@ -357,8 +373,16 @@ unsafe impl Sync for Section {}
 
 impl Drop for Section {
     fn drop(&mut self) {
+        if let Some(&base) = self.view.get()
+            && base != 0
+        {
+            use windows_sys::Win32::System::Memory::UnmapViewOfFile;
+            // SAFETY: our view, which nobody writes through any more (a
+            // window holds the section).
+            unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: base as *mut c_void }) };
+        }
         // SAFETY: our handle; views keep the section alive on their own.
-        unsafe { CloseHandle(self.0) };
+        unsafe { CloseHandle(self.handle) };
     }
 }
 
@@ -437,7 +461,7 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     // For the GPU side's in-place census: only a committed section can be
     // opened as a host heap.
     victory_gpu::title_memory_section(handle as usize, size as u64, on_wine());
-    let section = Arc::new(Section(handle));
+    let section = Arc::new(Section::new(handle, n));
     let mut physical = physical();
     let first = physical.next_page;
     physical.next_page += n * FRAMES;
@@ -487,7 +511,7 @@ impl View {
         // SAFETY: slices of a section we own; the view is ours until dropped.
         let at = unsafe {
             MapViewOfFile(
-                slice.section.0,
+                slice.section.handle,
                 FILE_MAP_WRITE,
                 (offset >> 32) as u32,
                 offset as u32,
@@ -514,6 +538,77 @@ impl Drop for View {
         use windows_sys::Win32::System::Memory::UnmapViewOfFile;
         // SAFETY: our view.
         unsafe { UnmapViewOfFile(self.at) };
+    }
+}
+
+/// Writable bytes of consecutive slices of one section, committed: through
+/// the section's own view of the whole of it, or (a host that does not map
+/// one) a view of just these, unmapped when dropped.
+enum Window {
+    Whole { section: Arc<Section>, at: usize, len: usize },
+    Own(View),
+}
+
+impl Window {
+    /// `n` slices from `slice` on.
+    fn map(slice: &Slice, n: usize) -> Option<Window> {
+        match slice.section.whole(slice.index, n) {
+            Some(at) => Some(Window::Whole {
+                section: slice.section.clone(),
+                at,
+                len: n * PAGE,
+            }),
+            None => View::map(slice, n).map(Window::Own),
+        }
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        match self {
+            // SAFETY: the section's view holds `len` committed read-write
+            // bytes there and stays while the section does; nothing else
+            // writes these slices through it until the request that asked
+            // is done (other views only alias them, as the console's do).
+            Window::Whole { section: _section, at, len } => unsafe {
+                std::slice::from_raw_parts_mut(*at as *mut u8, *len)
+            },
+            Window::Own(view) => view.bytes(),
+        }
+    }
+}
+
+impl Section {
+    /// The address of `n` pages from page `index` on in the section's view
+    /// of itself (mapped once, when first asked for), committed.
+    ///
+    /// Streamed data was written through a view of its own per request: a
+    /// map, a commit and an unmap, which takes the pages out of every
+    /// processor's tables again, so that each write also faulted its pages
+    /// in. With 24 workers at once that was 332 us for 64 KiB.
+    fn whole(&self, index: usize, n: usize) -> Option<usize> {
+        use windows_sys::Win32::System::Memory::{FILE_MAP_WRITE, MapViewOfFile};
+        let base = *self.view.get_or_init(|| {
+            // SAFETY: our section; the view is unmapped with it.
+            let at = unsafe { MapViewOfFile(self.handle, FILE_MAP_WRITE, 0, 0, 0) };
+            if at.Value.is_null() {
+                tracing::debug!(error = %std::io::Error::last_os_error(), "no view of a whole section");
+            }
+            at.Value as usize
+        });
+        if base == 0 {
+            return None;
+        }
+        let at = base + index * PAGE;
+        let pages = self.committed.get(index..index + n)?;
+        // A page stays committed while its section lives.
+        if !pages.iter().all(|c| c.load(Ordering::Relaxed)) {
+            if !commit(at, n * PAGE) {
+                return None;
+            }
+            for c in pages {
+                c.store(true, Ordering::Relaxed);
+            }
+        }
+        Some(at)
     }
 }
 
@@ -544,7 +639,8 @@ fn runs(pages: &[usize], offset: usize, len: usize) -> Option<Vec<(Slice, usize)
 
 /// Copies `data` into physical pages, from `offset` bytes into the first,
 /// whether or not they are mapped anywhere (DirectStorage destinations).
-/// One view per run of consecutive pages, not one per page: each view
+/// One window per run of consecutive pages, not one per page: without a
+/// view of the whole section each
 /// costs a map, a commit and an unmap (which flushes every core's TLB).
 /// False if a page is unknown or the host fails.
 pub(crate) fn write_physical(pages: &[usize], offset: usize, data: &[u8]) -> bool {
@@ -553,7 +649,7 @@ pub(crate) fn write_physical(pages: &[usize], offset: usize, data: &[u8]) -> boo
     };
     let (mut within, mut done) = (offset % PAGE, 0);
     for (slice, n) in &runs {
-        let Some(mut view) = View::map(slice, *n) else {
+        let Some(mut view) = Window::map(slice, *n) else {
             return false;
         };
         let k = (n * PAGE - within).min(data.len() - done);
@@ -567,7 +663,7 @@ pub(crate) fn write_physical(pages: &[usize], offset: usize, data: &[u8]) -> boo
 /// until dropped: DirectStorage decodes into it instead of a buffer it
 /// would then copy.
 pub(crate) struct PageWindow {
-    view: View,
+    view: Window,
     within: usize,
     len: usize,
 }
@@ -590,7 +686,7 @@ pub(crate) fn page_window(pages: &[usize], offset: usize, len: usize) -> Option<
         return None;
     };
     Some(PageWindow {
-        view: View::map(slice, *n)?,
+        view: Window::map(slice, *n)?,
         within: offset % PAGE,
         len,
     })
@@ -609,7 +705,8 @@ pub extern "system" fn XMemMapPhysicalPages(
     // maps what stays of them again, and a mapped view is a reservation
     // until it is committed. A read of title memory in place must not fall
     // into that gap (`victory_gpu::title_memory_remapping`).
-    let _changing = victory_gpu::title_memory_remapping();
+    let (from, span) = cut(&physical, base, n.saturating_mul(PAGE));
+    let _changing = victory_gpu::title_memory_remapping(from, span);
     unmap(&mut physical, base, n * PAGE);
     if pages.is_null() {
         return address;
@@ -678,7 +775,8 @@ pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
     let (to, from, len) = (to as usize, from as usize, len as usize);
     let mut physical = physical();
     // As in `XMemMapPhysicalPages`: no read in place meets the gap.
-    let _changing = victory_gpu::title_memory_remapping();
+    let (cut_from, span) = cut(&physical, to, len);
+    let _changing = victory_gpu::title_memory_remapping(cut_from, span);
     unmap(&mut physical, to, len);
     for k in (0..len).step_by(PAGE) {
         if from == 0 {
@@ -717,7 +815,7 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
             MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER,
         );
         MapViewOfFile3(
-            slice.section.0,
+            slice.section.handle,
             GetCurrentProcess(),
             base as *const c_void,
             (slice.index * PAGE) as u64,
@@ -745,7 +843,7 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     // New contents, read-write: the GPU side's copies no longer guard it.
     victory_gpu::title_memory_remapped(base, len);
     // What the range shows now, for the GPU side's in-place census.
-    victory_gpu::title_memory_view(base, len, slice.section.0 as usize, (slice.index * PAGE) as u64);
+    victory_gpu::title_memory_view(base, len, slice.section.handle as usize, (slice.index * PAGE) as u64);
     physical.views.insert(base, (len, slice));
     true
 }
@@ -796,6 +894,17 @@ fn commit_limit_message(
         "Close other applications or increase the Windows paging file size, then retry.\n",
     );
     message
+}
+
+/// What a change of `[base, base + len)` may take away for a moment: the
+/// range and the whole of every view it cuts ([`unmap`]).
+fn cut(physical: &Physical, base: usize, len: usize) -> (usize, usize) {
+    let end = base.saturating_add(len);
+    let first = physical.views.range(..=base).next_back();
+    let last = physical.views.range(..end).next_back();
+    let from = first.map_or(base, |(&at, &(size, _))| if at + size > base { at } else { base });
+    let to = last.map_or(end, |(&at, &(size, _))| end.max(at + size));
+    (from, to - from)
 }
 
 /// Returns `[base, base + len)` to placeholders; views reaching past it
@@ -1179,7 +1288,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut reads = 0u64;
                 while !stop.load(Ordering::Relaxed) {
-                    let _reading = victory_gpu::title_memory_reading();
+                    let _reading = victory_gpu::title_memory_reading(first, 1);
                     // SAFETY: the page is mapped whenever no change of
                     // mapping is under way, and none is while `_reading`
                     // is held.
@@ -1197,6 +1306,143 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         assert!(reader.join().expect("the reader never faulted") > 0);
         assert_eq!(XMemMapPhysicalPages(a, 3, std::ptr::null()), a);
+        assert_eq!(XMemFreePhysicalPages(3, pages.as_ptr()), 1);
+    }
+
+    /// Benchmark: reads of one mapping while another is remapped all the
+    /// time, with the lock on the memory read and on all of it.
+    #[test]
+    #[ignore = "benchmark: cargo test --release -p victory-hle reads_beside -- --ignored --nocapture"]
+    fn reads_beside_a_remapping() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let reserve = |n: usize| {
+            XMemVirtualAlloc(std::ptr::null_mut(), n * PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE)
+        };
+        let pages = allocate(64);
+        let a = reserve(64);
+        assert_eq!(XMemMapPhysicalPages(a, 64, pages.as_ptr()), a);
+        let other = allocate(64);
+        let b = reserve(64);
+        for (what, at, len) in [("its own memory", a as usize, 64 * PAGE), ("all memory", 0, usize::MAX)] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let streaming: Vec<_> = {
+                let (stop, other, b) = (stop.clone(), other.clone(), b as usize);
+                vec![std::thread::spawn(move || {
+                    let mut n = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        XMemMapPhysicalPages(b as *mut c_void, 64, other.as_ptr());
+                        n += 1;
+                    }
+                    n
+                })]
+            };
+            let (mut waited, mut sum) = (std::time::Duration::ZERO, 0u64);
+            for _ in 0..1000 {
+                let started = std::time::Instant::now();
+                let _reading = victory_gpu::title_memory_reading(at, len);
+                waited += started.elapsed();
+                // SAFETY: mapped, and no change of it under way.
+                sum += unsafe { std::slice::from_raw_parts(a.cast::<u64>(), 64 << 10) }.iter().sum::<u64>();
+            }
+            stop.store(true, Ordering::Relaxed);
+            let maps: u64 = streaming.into_iter().map(|t| t.join().unwrap()).sum();
+            eprintln!("lock on {what}: 1000 reads of 512 KiB waited {waited:?}; {maps} remappings beside them ({sum})");
+        }
+    }
+
+    /// Benchmark: streamed writes into physical pages, as DirectStorage's
+    /// workers make them.
+    #[test]
+    #[ignore = "benchmark: cargo test --release -p victory-hle streamed_writes -- --ignored --nocapture"]
+    fn streamed_writes_into_pages() {
+        let pages = allocate(1024);
+        for kib in [64usize, 256, 1024] {
+            let n = kib / 64;
+            for threads in [1usize, 8, 24] {
+                // Once to have the pages there, then timed.
+                for timed in [false, true] {
+                    let started = std::time::Instant::now();
+                    const EACH: usize = 400;
+                    std::thread::scope(|s| {
+                        for t in 0..threads {
+                            let pages = &pages;
+                            s.spawn(move || {
+                                let data = vec![t as u8; kib << 10];
+                                for i in 0..EACH {
+                                    let first = (t * 37 + i * n) % (1024 - n);
+                                    let mut w = page_window(&pages[first..first + n], 0, kib << 10)
+                                        .expect("a window");
+                                    w.bytes().copy_from_slice(&data);
+                                }
+                            });
+                        }
+                    });
+                    if timed {
+                        let took = started.elapsed();
+                        let mb = (threads * EACH * kib) as f64 / 1024.0;
+                        eprintln!(
+                            "{kib:>5} KiB, {threads:>2} threads: {:>7.1} us a write, {:>8.0} MB/s",
+                            took.as_secs_f64() * 1e6 * threads as f64 / (threads * EACH) as f64,
+                            mb / took.as_secs_f64()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mapping a page in the middle of a view takes the whole view away for
+    /// a moment: a read in place of its other pages, whose own mapping does
+    /// not change, does not meet that either.
+    #[test]
+    fn a_read_in_place_never_meets_the_gap_beside_a_remapped_page() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const TIMES: usize = 400;
+        let pages = allocate(3);
+        let a = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            TIMES * 3 * PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        assert!(!a.is_null());
+        let at = |page: usize| a.wrapping_byte_add(page * PAGE);
+        // The same three pages, as one view, many times over.
+        for i in 0..TIMES {
+            assert_eq!(XMemMapPhysicalPages(at(3 * i), 3, pages.as_ptr()), at(3 * i));
+        }
+        // SAFETY: mapped read-write.
+        unsafe { a.cast::<u8>().write(1) };
+        let current = std::sync::Arc::new(AtomicUsize::new(0));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (stop, current, a) = (stop.clone(), current.clone(), a as usize);
+                std::thread::spawn(move || {
+                    let mut reads = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        let first = a + 3 * PAGE * current.load(Ordering::Relaxed);
+                        let _reading = victory_gpu::title_memory_reading(first, 1);
+                        // SAFETY: mapped whenever no change that may take
+                        // it away is under way, and none is while held.
+                        assert_eq!(unsafe { (first as *const u8).read_volatile() }, 1);
+                        reads += 1;
+                    }
+                    reads
+                })
+            })
+            .collect();
+        for i in 0..TIMES {
+            current.store(i, Ordering::Relaxed);
+            std::thread::yield_now();
+            let middle = at(3 * i + 1);
+            assert_eq!(XMemMapPhysicalPages(middle, 1, &pages[1]), middle);
+        }
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            assert!(r.join().expect("the reader never faulted") > 0);
+        }
         assert_eq!(XMemFreePhysicalPages(3, pages.as_ptr()), 1);
     }
 
@@ -1464,12 +1710,18 @@ pub mod low_guards {
 
         static TEST: Mutex<()> = Mutex::new(());
 
+        /// Where each test has its hole: the system hands out no addresses
+        /// there on its own. (In a hole it had picked itself, another test's
+        /// thread or allocation now and then took the place between its
+        /// release and the guard.)
+        const HOLES: [usize; 2] = [0x5000_0000_0000, 0x5100_0000_0000];
+
         #[test]
         fn a_refused_retry_leaves_the_guards_in_place() {
             let _one = TEST.lock().unwrap();
             // SAFETY: a fresh reservation, released at once.
             let hole =
-                unsafe { VirtualAlloc(std::ptr::null(), 4 * GRANULE, MEM_RESERVE, PAGE_NOACCESS) };
+                unsafe { VirtualAlloc(HOLES[0] as *const _, 4 * GRANULE, MEM_RESERVE, PAGE_NOACCESS) };
             assert!(!hole.is_null());
             let first = hole as usize;
             // SAFETY: ours.
@@ -1496,7 +1748,7 @@ pub mod low_guards {
             // A known hole of four granules: reserved, then freed.
             // SAFETY: a fresh reservation, released at once.
             let hole =
-                unsafe { VirtualAlloc(std::ptr::null(), 4 * GRANULE, MEM_RESERVE, PAGE_NOACCESS) }
+                unsafe { VirtualAlloc(HOLES[1] as *const _, 4 * GRANULE, MEM_RESERVE, PAGE_NOACCESS) }
                     as usize;
             assert_ne!(hole, 0);
             // SAFETY: ours.

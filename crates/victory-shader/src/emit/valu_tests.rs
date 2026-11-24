@@ -288,28 +288,38 @@ fn compute_writes_through_spilled_root_uav() {
         let (root, pso) = host
             .compute_pipeline(&shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
-        let out = host
-            .dispatch(
-                &root,
-                &pso,
-                &Dispatch {
-                    roots: vec![
-                        (0, Root::Constants(vec![0])),
-                        (
-                            1,
-                            Root::Table {
-                                sampler: false,
-                                index: 1,
-                            },
-                        ),
-                    ],
-                    views: &[View::RawUav(4), View::RawUav(4)],
-                    samplers: &[],
-                    groups: [1, 1, 1],
-                },
-            )
-            .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
-        assert_eq!(out, [vec![0; 4], vec![0, 29, 0, 0]], "{label}");
+        for bias in [0, 4, 8, 12] {
+            let mut user_data = vec![0; shader.user_data_dwords().max(1) as usize];
+            for entry in &shader.user_data {
+                if entry.root == RootType::Descriptor {
+                    user_data[entry.index as usize] = bias;
+                }
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![
+                            (0, Root::Constants(user_data)),
+                            (
+                                1,
+                                Root::Table {
+                                    sampler: false,
+                                    index: 1,
+                                },
+                            ),
+                        ],
+                        views: &[View::RawUav(8), View::RawUav(8)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            let mut expected = vec![0; 8];
+            expected[(bias / 4 + 1) as usize] = 29;
+            assert_eq!(out, [vec![0; 8], expected], "{label}, bias {bias}");
+        }
         eprintln!("{label}: root UAV write verified");
         ran += 1;
     }

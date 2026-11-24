@@ -735,8 +735,7 @@ mod tests {
             let c = super::Container::parse(&bytes).unwrap();
             let p = crate::ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
             let st = crate::structure::structure(&p).unwrap();
-            let res =
-                crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
             let io = crate::io::raise(&p, &native).unwrap();
             let out = super::emit(&c, &native, &p, &st, &io, &res).unwrap();
             // dxil.dll, where there is one, checks PSV0 against the module.
@@ -926,6 +925,18 @@ mod tests {
             .collect()
     }
 
+    #[cfg(windows)]
+    fn user_data_with_guards(cs: &super::HostShader, first: u32, views: usize) -> Vec<u32> {
+        let mut data = vec![0; cs.user_data_dwords().max(1) as usize];
+        data[0] = first;
+        for entry in &cs.user_data {
+            if let Some(guard) = super::host::guard(entry.root, views, 0) {
+                data[entry.index as usize] = guard;
+            }
+        }
+        data
+    }
+
     /// What the GPU side makes for a buffer view of `count` elements of
     /// `stride` bytes from element `first` of the buffer in heap slot `of`:
     /// the raw view of those bytes (to go in heap slot `raw_slot`) and the
@@ -936,11 +947,9 @@ mod tests {
         raw_slot: u32,
         (first, count, stride): (u32, u32, u32),
     ) -> (super::host::View<'static>, super::StrideEntry) {
-        let window = super::RawWindow::covering(
-            u64::from(first * stride),
-            u64::from(count * stride),
-        )
-        .unwrap();
+        let window =
+            super::RawWindow::covering(u64::from(first * stride), u64::from(count * stride))
+                .unwrap();
         (
             super::host::View::RawAlias {
                 of,
@@ -1039,7 +1048,8 @@ mod tests {
             for slot in 0..2 {
                 let entry = match elements {
                     Some((first, count)) => {
-                        let (raw, entry) = raw_view_of(slot, 2 + slot as u32, (first, count, stride));
+                        let (raw, entry) =
+                            raw_view_of(slot, 2 + slot as u32, (first, count, stride));
                         views.push(raw);
                         entry
                     }
@@ -1056,7 +1066,10 @@ mod tests {
                     &pso,
                     &Dispatch {
                         roots: vec![
-                            (0, Root::Constants(vec![0, 0, 0, 0, 0])),
+                            (
+                                0,
+                                Root::Constants(user_data_with_guards(&cs, 0, views.len())),
+                            ),
                             (
                                 1,
                                 Root::View {
@@ -1183,7 +1196,7 @@ mod tests {
                             &pso,
                             &Dispatch {
                                 roots: vec![
-                                    (0, Root::Constants(vec![0, 0, 0, 0, 0])),
+                                    (0, Root::Constants(user_data_with_guards(&cs, 0, 6))),
                                     (
                                         1,
                                         Root::View {
@@ -1277,7 +1290,7 @@ mod tests {
                             &pso,
                             &Dispatch {
                                 roots: vec![
-                                    (0, Root::Constants(vec![s0, 0, 0, 0, 0])),
+                                    (0, Root::Constants(user_data_with_guards(&cs, s0, 5))),
                                     (
                                         1,
                                         Root::View {

@@ -127,8 +127,11 @@ fn run(shader: &HostShader, views: &[View]) -> Vec<(&'static str, Vec<u32>)> {
         // Both tables start at heap index 0.
         let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
         for u in &shader.user_data {
-            assert_eq!(u.root, RootType::Table, "{u:?}");
-            ud[u.index as usize] = 0;
+            ud[u.index as usize] = match u.root {
+                RootType::Table => 0,
+                root => super::host::guard(root, views.len(), samplers.len())
+                    .unwrap_or_else(|| panic!("unexpected user data {u:?}")),
+            };
         }
         let words = host
             .dispatch(

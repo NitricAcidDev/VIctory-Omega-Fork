@@ -739,10 +739,8 @@ pub(super) fn plan_lds_fences(p: &Program, uniform: &[bool]) -> Result<LdsFences
         let mut changed = false;
         for &b in &order {
             if !uniform[b] {
-                let next_r =
-                    has_read[b] || p.blocks[b].preds.iter().any(|&q| pending_read[q]);
-                let next_w =
-                    has_write[b] || p.blocks[b].preds.iter().any(|&q| pending_write[q]);
+                let next_r = has_read[b] || p.blocks[b].preds.iter().any(|&q| pending_read[q]);
+                let next_w = has_write[b] || p.blocks[b].preds.iter().any(|&q| pending_write[q]);
                 if next_r && !pending_read[b] {
                     pending_read[b] = true;
                     changed = true;
@@ -4457,10 +4455,41 @@ impl<'a> Lower<'a> {
     fn built_offset(&mut self, src: &Source) -> Result<(u32, Option<V>), Why> {
         match src {
             Source::Built { address, .. } => {
-                let x = match address.dynamic {
+                let mut x = match address.dynamic {
                     Some(v) => Some(self.i32_of(v)?),
                     None => None,
                 };
+                if let Some(used) = self.used_kind(src)
+                    && matches!(used.kind, ResourceType::Srv | ResourceType::Uav)
+                {
+                    let slot = self.x.native.layout[address.param].slot;
+                    // Raw views start on 16 bytes. The host aligns the view
+                    // down and supplies the remaining address bits separately.
+                    let after = self
+                        .x
+                        .native
+                        .layout
+                        .iter()
+                        .map(|p| u32::from(p.user_data) + p.sgprs)
+                        .max()
+                        .unwrap_or(0);
+                    // The first two extra dwords are the heap guards.
+                    let index = after + 2 + u32::from(slot);
+                    self.user_reads.insert(
+                        index,
+                        UserData {
+                            index,
+                            slot,
+                            root: RootType::Descriptor,
+                            dword: 0,
+                        },
+                    );
+                    let bias = self.user_dword(index);
+                    x = Some(match x {
+                        Some(value) => self.s.m.bin(self.cur, Bin::Add, value, bias),
+                        None => bias,
+                    });
+                }
                 Ok((address.offset, x))
             }
             _ => Ok((0, None)),
@@ -4722,22 +4751,14 @@ impl<'a> Lower<'a> {
     /// shortcut: the console reads zeros (and drops writes) where `off` and
     /// the access pass the element's end; here they reach the next element,
     /// as the statically known strides' structured accesses may.
-    fn runtime_view(
-        &mut self,
-        src: &Source,
-        index: V,
-        off: V,
-        props: u32,
-    ) -> Result<(V, V), Why> {
+    fn runtime_view(&mut self, src: &Source, index: V, off: V, props: u32) -> Result<(V, V), Why> {
         let [raw, stride, bias] = self.stride_entry(src)?;
         let c = self.cur;
         let element = self.s.m.bin(c, Bin::Mul, index, stride);
         let byte = self.s.m.bin(c, Bin::Add, element, off);
         let byte = self.s.m.bin(c, Bin::Add, byte, bias);
         // The raw alias varies with the heap slot of a waterfall load.
-        let from_waterfall = |arg: &Source| {
-            matches!(arg, Source::Loaded { load, .. } if self.x.res.waterfall.loads.contains(load))
-        };
+        let from_waterfall = |arg: &Source| matches!(arg, Source::Loaded { load, .. } if self.x.res.waterfall.loads.contains(load));
         let nonuniform = match src {
             Source::Phi { args, .. } => args.iter().any(from_waterfall),
             _ => from_waterfall(src),
@@ -8596,9 +8617,7 @@ mod tests {
             S_ENDPGM,
         ];
 
-        let code: Vec<u8> = words.iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect();
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
 
         let native = NativeProgram {
             stage: HwStage::Cs,
@@ -8615,9 +8634,12 @@ mod tests {
 
         let p = ir::build(&native.code, false, 256).unwrap();
 
-        assert!(p.blocks.iter()
-            .flat_map(|b| &b.insts)
-            .any(|i| i.name() == "v_perm_b32"));
+        assert!(
+            p.blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(|i| i.name() == "v_perm_b32")
+        );
 
         let st = structure::structure(&p).unwrap();
         let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
@@ -8635,13 +8657,12 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
             options: super::TranslateOptions::default(),
-        }).unwrap();
+        })
+        .unwrap();
 
-        let container =
-            crate::Container::parse(&emitted.dxil).unwrap();
+        let container = crate::Container::parse(&emitted.dxil).unwrap();
 
-        let features =
-            container.part(crate::FourCC::SFI0).unwrap();
+        let features = container.part(crate::FourCC::SFI0).unwrap();
 
         u64::from_le_bytes(features.data.try_into().unwrap())
     }

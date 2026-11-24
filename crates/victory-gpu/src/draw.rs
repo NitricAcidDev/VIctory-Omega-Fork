@@ -152,7 +152,11 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
     let len = shadow
         .left(address)
         .min(if srv { 1 << 20 } else { 1 << 16 });
-    let gpu = shadow.gpu(address);
+    let gpu = if srv {
+        shadow.gpu(address) & !15
+    } else {
+        shadow.gpu(address)
+    };
     if srv || gpu % 256 == 0 {
         shadow.refresh(list, address, len);
         return Some(gpu);
@@ -294,7 +298,12 @@ impl State {
     }
 
     pub(crate) fn clear_vertex_buffers(&mut self, start: u32, count: u32) {
-        for slot in self.vertex.iter_mut().skip(start as usize).take(count as usize) {
+        for slot in self
+            .vertex
+            .iter_mut()
+            .skip(start as usize)
+            .take(count as usize)
+        {
             *slot = VertexView::default();
         }
     }
@@ -366,6 +375,7 @@ impl State {
     /// it: a table's byte offset in its heap, a constant's value.
     fn user_value(&self, compute: bool, slot: u8, root: RootType, dword: u32) -> u32 {
         match (self.roots_ref(compute).get(usize::from(slot)), root) {
+            (Some(Root::View(address)), RootType::Descriptor) => (address & 15) as u32,
             (Some(Root::Table(handle)), RootType::Table) => match self.heap_of(*handle) {
                 Some(heap) => (handle - heap.start) as u32,
                 None => {
@@ -663,17 +673,8 @@ impl State {
                         // SAFETY: a live buffer.
                         let base = unsafe { s.buffer.GetGPUVirtualAddress() };
                         let offset = s.gpu(*a) - base;
-                        if offset.is_multiple_of(16) {
-                            host.raw_at(index, &s.buffer, offset, s.left(*a));
-                        } else {
-                            // Raw views start on 16 bytes; one from the
-                            // aligned start would shift every read.
-                            once!(
-                                address = format_args!("{a:#x}"),
-                                "a root SRV not on 16 bytes reads zeros"
-                            );
-                            host.null_raw_at(index);
-                        }
+                        let bias = offset & 15;
+                        host.raw_at(index, &s.buffer, offset - bias, s.left(*a) + bias);
                     }
                     None => host.null_raw_at(index),
                 }
@@ -733,18 +734,9 @@ impl State {
                         // SAFETY: a live buffer.
                         let base = unsafe { s.buffer.GetGPUVirtualAddress() };
                         let offset = s.gpu(*a) - base;
-                        if offset.is_multiple_of(16) {
-                            let len = s.left(*a).min(ROOT_UAV_BYTES);
-                            host.raw_uav_at(index, &s.buffer, offset, len);
-                        } else {
-                            // Raw views start on 16 bytes; one from the
-                            // aligned start would shift every access.
-                            once!(
-                                address = format_args!("{a:#x}"),
-                                "a root UAV not on 16 bytes is not written"
-                            );
-                            host.null_raw_uav_at(index);
-                        }
+                        let bias = offset & 15;
+                        let len = s.left(*a).min(ROOT_UAV_BYTES);
+                        host.raw_uav_at(index, &s.buffer, offset - bias, len + bias);
                     }
                     None => {
                         if let Some(a) = address {

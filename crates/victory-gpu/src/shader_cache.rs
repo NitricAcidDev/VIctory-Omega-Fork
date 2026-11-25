@@ -49,6 +49,7 @@ fn build() -> &'static [u8; 32] {
                 "VICTORY_SHADER_LOOP_LIMIT: translated loops stop sooner"
             );
         }
+        crate::descriptor::host::probe_view_limit();
         *blake3::hash(&victory_shader::emit::translator_id()).as_bytes()
     })
 }

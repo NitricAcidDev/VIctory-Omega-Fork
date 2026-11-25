@@ -124,7 +124,7 @@ const WINDOW_MOST: u64 = 64;
 ///
 /// The step is the one the title is seen to take, not the stride its
 /// command signature names: it draws one record a call, for which the
-/// stride means nothing, and Grand Theft Auto VI names 12 bytes (the three
+/// stride means nothing, and the title names 12 bytes (the three
 /// words of a mesh dispatch) for records it keeps 32 bytes apart (2,173 of
 /// a frame's 3,349 mesh records in run 87's listed frame; 283 are 16
 /// apart, which ends a window). Walked by the named stride the window
@@ -235,7 +235,7 @@ impl State {
 }
 
 /// An experiment on the title's scissor rectangles (`VICTORY_SCISSOR_TEST=full`):
-/// they are all widened to the whole target. Grand Theft Auto VI's room at
+/// they are all widened to the whole target. The title's room at
 /// the start of the prologue lost its walls in five runs of seven, and in
 /// those runs the player's body and the world outside were cut by one
 /// rectangle around the window (run 85, frame 2046): one run with this on
@@ -1470,7 +1470,12 @@ impl State {
             return;
         }
         /// Bytes of texture memory staged per frame.
-        const PER_FRAME: u64 = 192 << 20;
+        // `VICTORY_TEXTURE_STAGE_MB` raises it: a backlog of tens of thousands of
+        // textures (a scene's first minutes) then drains in fewer frames.
+        static PER_FRAME_MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let per_frame: u64 = *PER_FRAME_MB.get_or_init(|| {
+            std::env::var("VICTORY_TEXTURE_STAGE_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(192)
+        }) << 20;
         static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
         static SPENT: AtomicU64 = AtomicU64::new(0);
         let frame = crate::frame::current();
@@ -1523,10 +1528,19 @@ impl State {
         // records the frame, and making and staging 192 MB of textures took
         // 1.6-2.2 s of each of the world's first twenty frames (run 20).
         // The rest waits for the next frames, as it does past the bytes.
-        const SPAN: std::time::Duration = std::time::Duration::from_millis(250);
+        static SPAN_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let span = std::time::Duration::from_millis(*SPAN_MS.get_or_init(|| {
+            std::env::var("VICTORY_TEXTURE_STAGE_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(250)
+        }));
+        // A backlog (a scene's first minutes: 22,000 slots due, 2-3 minutes of black
+        // surfaces at 192 MB a frame) gets three times the bytes and the time until it
+        // drains; `VICTORY_TEXTURE_CATCHUP=0` keeps the plain budget.
+        static CATCHUP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let catchup = *CATCHUP.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_CATCHUP").is_none_or(|v| v != "0"));
+        let (per_frame, span) = if catchup && due.len() >= 1024 { (per_frame * 3, span * 3) } else { (per_frame, span) };
         let began = std::time::Instant::now();
         for (index, write) in due {
-            if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > SPAN {
+            if SPENT.load(Ordering::Relaxed) >= per_frame || began.elapsed() > span {
                 break;
             }
             // A placed texture whose memory is not mapped (not streamed in
@@ -1763,7 +1777,7 @@ impl State {
             let targets: Vec<String> = self.targets.iter().filter_map(|&t| described(t)).collect();
             let _ = write!(text, " targets {targets:?} depth {:?} state [{}]", described(self.depth), p.state);
             // The title's scissor and viewport at this draw (the first of
-            // each): Grand Theft Auto VI draws what it sees through a
+            // each): the title draws what it sees through a
             // portal (a window, from inside a room) under the portal's
             // rectangle, and the listing did not say which draws those are.
             if let Some(r) = self.scissors.first() {
@@ -2315,7 +2329,7 @@ impl State {
             crate::pipeline::note_drop(self.pipeline as This);
             return false;
         };
-        // Indirect rectangles (Grand Theft Auto VI's tiled lighting, 256
+        // Indirect rectangles (the title's tiled lighting, 256
         // indirect draws a frame, makes their corners from the vertex
         // number) are completed by the pipeline's geometry stage: the
         // arguments stay the title's, three vertices a rectangle. They

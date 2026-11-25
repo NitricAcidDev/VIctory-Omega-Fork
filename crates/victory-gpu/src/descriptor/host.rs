@@ -201,7 +201,7 @@ static SPANNED: [std::sync::atomic::AtomicU64; 2] = [
 
 /// Since the start: slots whose view a newer view of other memory there
 /// made stale; ranges of memory noted as mapped, unmapped or written;
-/// ranges dropped because no pass took them; slots made due by such
+/// ranges consolidated before a pass took them; slots made due by such
 /// ranges; and made slots whose memory was found unmapped (made null).
 pub(crate) static STALE: [std::sync::atomic::AtomicU64; 5] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 5];
@@ -237,12 +237,29 @@ pub(crate) fn remapped(at: usize, len: usize) {
         return;
     }
     if ranges.len() >= MOST {
-        // No pass runs (no shader that picks textures by index is bound):
-        // the slots there are looked at when they are due, as before.
-        STALE[2].fetch_add(ranges.len() as u64, Relaxed);
-        ranges.clear();
+        // Slots already uploaded may never be checked again. Preserve the
+        // notification for every changed address, even if that means
+        // rechecking some nearby textures whose memory stayed the same.
+        let before = ranges.len();
+        compact_remapped_ranges(&mut ranges);
+        STALE[2].fetch_add((before - ranges.len()) as u64, Relaxed);
     }
     ranges.push((start, end));
+}
+
+/// Halve the range count without losing coverage. Pairing sorted ranges
+/// confines any extra checks to the gaps between neighboring ranges.
+fn compact_remapped_ranges(ranges: &mut Vec<(u64, u64)>) {
+    ranges.sort_unstable();
+    let pairs = ranges.len() / 2;
+    for i in 0..pairs {
+        let (start, end) = ranges[i * 2];
+        ranges[i] = (start, end.max(ranges[i * 2 + 1].1));
+    }
+    if !ranges.len().is_multiple_of(2) {
+        ranges[pairs] = ranges[ranges.len() - 1];
+    }
+    ranges.truncate(ranges.len().div_ceil(2));
 }
 
 /// Frames for which a slot a draw read through a table counts as a table's
@@ -325,10 +342,10 @@ impl TextureQueue {
 
     /// Up to `max` slots due at `frame`, each with its write number, in
     /// the order to serve them:
-    /// - first the ones looked at before (their memory was not mapped, or
+    /// - in batches, the ones looked at before (their memory was not mapped, or
     ///   only part of it): the look is a query, and memory that has
     ///   arrived since is what the title streamed in last;
-    /// - then the others, the newest write first and the oldest next, in
+    /// - between retry batches, the others, newest write and oldest next, in
     ///   turns: slot order served the low slots of a backlog of
     ///   25,000-40,000 while the textures of the shot on screen waited
     ///   (run 52: 98% of the drawn pixels had no colour texture in the
@@ -344,17 +361,25 @@ impl TextureQueue {
         let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
         again.sort_unstable_by(newest_first);
         fresh.sort_unstable_by(newest_first);
-        let mut order: Vec<(u32, u64)> = again.iter().map(|&(_, index, write)| (index, write)).collect();
-        let (mut new, mut old) = (0, fresh.len());
-        while new < old && order.len() < max {
-            order.push((fresh[new].1, fresh[new].2));
-            new += 1;
+        // Keep retries ahead in small batches, but do not let a large set
+        // of unmapped retries starve newly written textures indefinitely.
+        let mut order = Vec::with_capacity(max.min(again.len() + fresh.len()));
+        let (mut retry, mut new, mut old) = (0, 0, fresh.len());
+        while order.len() < max && (retry < again.len() || new < old) {
+            for _ in 0..8 {
+                if retry == again.len() || order.len() == max { break; }
+                order.push((again[retry].1, again[retry].2));
+                retry += 1;
+            }
+            if new < old && order.len() < max {
+                order.push((fresh[new].1, fresh[new].2));
+                new += 1;
+            }
             if new < old && order.len() < max {
                 old -= 1;
                 order.push((fresh[old].1, fresh[old].2));
             }
         }
-        order.truncate(max);
         order
     }
 
@@ -2568,6 +2593,22 @@ mod tests {
         assert!(q.due(16, 100).iter().any(|d| d.0 == 98));
     }
 
+    #[test]
+    fn retries_do_not_starve_new_textures() {
+        let mut q = TextureQueue::default();
+        for i in 0..32 {
+            q.written(i, 0, 0, false);
+            let write = q.slots[&i].write;
+            q.later(i, write, 0, 1);
+        }
+        q.written(100, 1, 0, false);
+        q.written(101, 1, 0, false);
+        let order: Vec<u32> = q.due(1, 10).into_iter().map(|d| d.0).collect();
+        assert_eq!(order.len(), 10);
+        assert!(order.contains(&100));
+        assert!(order.contains(&101));
+    }
+
     /// A view written over memory that older views describe otherwise
     /// makes those stale; views of the same span are one texture's.
     #[test]
@@ -2602,6 +2643,18 @@ mod tests {
         spans.forget(4);
         spans.forget(7);
         assert!(spans.by_start.is_empty() && spans.by_slot.is_empty());
+    }
+
+    #[test]
+    fn compacted_notifications_cover_all_changed_addresses() {
+        let original = [(300, 310), (40, 100), (50, 60), (200, 220), (400, 480)];
+        let mut compacted = original.to_vec();
+        compact_remapped_ranges(&mut compacted);
+        compact_remapped_ranges(&mut compacted);
+        assert_eq!(compacted.len(), 2);
+        for (start, end) in original {
+            assert!(compacted.iter().any(|&(a, b)| a <= start && b >= end));
+        }
     }
 
     /// Memory the runtime maps under a slot's texture makes the slot due

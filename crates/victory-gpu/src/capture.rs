@@ -16,6 +16,24 @@ pub(crate) fn folder() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
+// A request is consumed once at present, after the current frame's
+// commands have been recorded. Start logging from the following frame.
+static REQUESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn take_request(frame: u64) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_CAPTURE_ON_REQUEST").is_some_and(|v| v == "1")) {
+        return;
+    }
+    if let Some(folder) = folder()
+        && std::fs::remove_file(folder.join("capture-next-frame")).is_ok()
+    {
+        let next = frame + 1;
+        REQUESTED.store(next, std::sync::atomic::Ordering::Release);
+        tracing::info!(frame = next, "capturing requested frame");
+    }
+}
+
 /// Frames listed in `VICTORY_CAPTURE_FRAMES` (comma-separated): saved
 /// too, and their draws traced at debug level.
 pub(crate) fn listed(n: u64) -> bool {
@@ -47,7 +65,8 @@ pub(crate) fn listed(n: u64) -> bool {
     });
     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
     let after = n.wrapping_sub(first);
-    named || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
+    let requested = n == REQUESTED.load(std::sync::atomic::Ordering::Acquire);
+    named || requested || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
 }
 
 /// With a capture folder, for the frames [`listed`]: `what` is added to
@@ -843,7 +862,8 @@ pub(crate) fn probe(
 }
 
 /// Whether every pixel [`probe`] read is (near) black.
-pub(crate) fn black(buffer: &ID3D12Resource) -> bool {
+pub(crate) fn black(buffer: &ID3D12Resource, frame: u64) -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let mut data = std::ptr::null_mut();
     // SAFETY: the copies finished (every submission is waited for).
     unsafe {
@@ -857,6 +877,15 @@ pub(crate) fn black(buffer: &ID3D12Resource) -> bool {
             .flat_map(|pixel| pixel[..3].iter().copied())
             .max()
             .unwrap_or(0);
+        if *TRACE.get_or_init(|| std::env::var_os("VICTORY_TRACE_PRESENT").is_some_and(|v| v == "1")) {
+            let mut signature = blake3::Hasher::new();
+            for pixel in bytes.chunks_exact(SLOT as usize) {
+                signature.update(&pixel[..3]);
+            }
+            let hash = signature.finalize();
+            let sample = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
+            tracing::info!(frame, sample, level, "presented frame sample");
+        }
         buffer.Unmap(0, None);
         let mut levels = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
         if levels.len() == 12 {

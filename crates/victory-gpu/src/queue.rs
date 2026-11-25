@@ -778,6 +778,8 @@ extern "system" fn present(
     // its fence: a wait is not kept across frames.
     #[cfg(windows)]
     release_held(forces());
+    #[cfg(windows)]
+    crate::texture::end_present();
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
     if frame.is_power_of_two() {
         let (draws, dispatches) = crate::list::take_counts();
@@ -846,6 +848,8 @@ extern "system" fn present(
         #[cfg(not(feature = "diagnostics"))]
         let _ = shown;
     }
+    #[cfg(all(windows, feature = "diagnostics"))]
+    crate::capture::take_request(frame);
     #[cfg(not(windows))]
     let _ = (planes, plane_parameters);
     S_OK

@@ -594,6 +594,29 @@ pub(crate) fn title_written(texture: &ID3D12Resource) -> bool {
     unsafe { texture.GetDesc() }.Flags.0 & TARGET_DEPTH_UNORDERED == 0
 }
 
+// The intro uses a handful of draws per present; the first 3D frame
+// runs hundreds. Keep the extra uploads out of the 3D renderer.
+static INTRO_UPLOADS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static WORLD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn intro_uploads() -> bool {
+    *INTRO_UPLOADS.get_or_init(|| std::env::var_os("VICTORY_INTRO_UPLOADS").is_some_and(|v| v == "1"))
+        && !WORLD_STARTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn end_present() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    if intro_uploads() {
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = crate::draw::drawn();
+        if now.saturating_sub(LAST.swap(now, Relaxed)) >= 128 {
+            WORLD_STARTED.store(true, Relaxed);
+            tracing::info!("intro texture uploads ended at the first 3D frame");
+        }
+    }
+}
+
 /// Records, once per list, the copy of `resource`'s staging buffer into
 /// its host copy, and the detiling that refreshes the staging buffer at
 /// submission if the memory changed. Leaves the texture in the copy
@@ -618,7 +641,10 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     // at submission is left, and what it finds changed the next list that
     // samples the texture uploads (a frame late where every list of the
     // frame was recorded before that check).
-    if staging.uploaded.load(Relaxed) && !staging.dirty.load(Relaxed) {
+    // For the intro, record the copy even if staging is clean now.
+    // Its submission-time refresh can see the next movie image after
+    // the list has been recorded, and this copy can use it immediately.
+    if !intro_uploads() && staging.uploaded.load(Relaxed) && !staging.dirty.load(Relaxed) {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexSkipped, 1);
         list.defer_texture(staging);
@@ -738,7 +764,13 @@ impl Staging {
     fn refresh_held(&self, last: &mut Last) -> usize {
         let size = self.layout.size as usize;
         let start = self.memory as usize;
-        if let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, false)) {
+        // The movie can update memory through another mapping. During the
+        // intro, check the bytes themselves at submission even if neither
+        // write tracker saw an update through this address.
+        let intro = intro_uploads();
+        if !intro
+            && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, false))
+        {
             if last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked) {
                 return 0;
             }
@@ -764,13 +796,16 @@ impl Staging {
         // texture's address, so the textures take turns.
         // `VICTORY_TEXTURE_GUARD=0` hashes at every check, as before.
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
+        let mut observed_write = false;
+        if !intro
+            && *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
             && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
         {
             const HASH_EVERY: u64 = 8;
             let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
             last.asked = now;
             let turn = crate::frame::current().wrapping_add((start >> 16) as u64).is_multiple_of(HASH_EVERY);
+            observed_write = !unwritten;
             if unwritten && !turn {
                 return 0;
             }
@@ -797,11 +832,10 @@ impl Staging {
             // there, the usual state while it streams in. Read through the
             // copy, which stands unmapped pages (zeros), and upload what
             // is there; nothing at all mapped changes nothing.
-            // shortcut: read again at most every 30 frames (reading around
-            // unmapped pages is slow, and nothing tells us when pages
-            // arrive): a mip that streams in shows up to 30 frames late.
+            // Throttle polling when we have no new information. A write or
+            // remap seen by the guard may have made another mip available.
             let frame = crate::frame::current();
-            if last.partial.is_some_and(|at| frame < at + 30) {
+            if !intro && !observed_write && last.partial.is_some_and(|at| frame < at + 30) {
                 return 0;
             }
             last.partial = Some(frame);

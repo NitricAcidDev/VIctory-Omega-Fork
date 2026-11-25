@@ -274,6 +274,13 @@ static BUILDER: Mutex<Builder> = Mutex::new(Builder {
 #[cfg(windows)]
 static BUILT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the structure builder runs, so that the title's rays hit what is
+/// there ([`crate::ambient`] ends then).
+#[cfg(windows)]
+pub(crate) fn rays_run() -> bool {
+    BUILT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the programs that walk the title's ray-tracing structures may
 /// read their nodes: the structure builder runs ([`Builder`]). While it
 /// does not (before its first dispatch, with `VICTORY_BVH_BUILDER=0`, or
@@ -288,7 +295,7 @@ static BUILT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 #[cfg(windows)]
 pub(crate) fn structures_walked() -> bool {
     static ANYWAY: OnceLock<bool> = OnceLock::new();
-    BUILT.load(std::sync::atomic::Ordering::Relaxed)
+    rays_run()
         || *ANYWAY.get_or_init(|| std::env::var_os("VICTORY_BVH_NO_HIT").is_some_and(|v| v == "0"))
 }
 

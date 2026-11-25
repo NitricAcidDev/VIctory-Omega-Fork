@@ -18,7 +18,8 @@
 //!
 //! `VICTORY_AMBIENT=off` keeps the title's own output of both;
 //! `VICTORY_AMBIENT=<level>` is the level where the sky is not known yet
-//! (0.6). Off unless set with `VICTORY_BVH_BUILDER=1`: the rays are to run.
+//! (0.6). Unless set, it ends when the structure builder runs
+//! (`VICTORY_BVH_BUILDER=1`): the rays light the picture from then on.
 //! shortcut: the sky's light everywhere, from everywhere, indoors too; gone
 //! once rays run.
 
@@ -43,21 +44,21 @@ const DEFAULT: f32 = 0.6;
 
 /// The floor; `None` if off.
 pub(crate) fn level() -> Option<f32> {
-    static LEVEL: OnceLock<f32> = OnceLock::new();
-    let level = *LEVEL.get_or_init(|| {
-        let rays = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");
-        level_of(std::env::var("VICTORY_AMBIENT").ok().as_deref(), rays)
-    });
-    (level >= 0.0).then_some(level)
+    static LEVEL: OnceLock<Option<(f32, bool)>> = OnceLock::new();
+    let set = *LEVEL.get_or_init(|| level_of(std::env::var("VICTORY_AMBIENT").ok().as_deref()));
+    set.filter(|&(_, set)| set || !crate::pipeline::rays_run()).map(|(level, _)| level)
 }
 
-/// The level `VICTORY_AMBIENT` asks for; below 0 for none. `rays`: the
-/// title's rays were asked for, so only what is set counts.
-fn level_of(set: Option<&str>, rays: bool) -> f32 {
+/// The level `VICTORY_AMBIENT` asks for, and whether it was set at all
+/// (then it stays when the title's rays run); `None` for `off`.
+fn level_of(set: Option<&str>) -> Option<(f32, bool)> {
     match set.map(str::trim) {
-        Some("off") => -1.0,
-        None | Some("") if rays => -1.0,
-        set => set.and_then(|s| s.parse().ok()).filter(|l: &f32| l.is_finite() && *l >= 0.0).unwrap_or(DEFAULT),
+        Some("off") => None,
+        None | Some("") => Some((DEFAULT, false)),
+        Some(level) => {
+            let level = level.parse().ok().filter(|l: &f32| l.is_finite() && *l >= 0.0);
+            Some((level.unwrap_or(DEFAULT), true))
+        }
     }
 }
 
@@ -609,5 +610,17 @@ mod tests {
             return;
         };
         super::make(&host.device).expect("the ambient pass");
+    }
+
+    /// On unless `off`; only a level that was set outlives the rays' start.
+    #[test]
+    fn the_stand_in_is_on_unless_off() {
+        use super::{DEFAULT, level_of};
+        assert_eq!(level_of(None), Some((DEFAULT, false)));
+        assert_eq!(level_of(Some("")), Some((DEFAULT, false)));
+        assert_eq!(level_of(Some("off")), None);
+        assert_eq!(level_of(Some(" 0.3 ")), Some((0.3, true)));
+        assert_eq!(level_of(Some("0")), Some((0.0, true)));
+        assert_eq!(level_of(Some("nonsense")), Some((DEFAULT, true)));
     }
 }

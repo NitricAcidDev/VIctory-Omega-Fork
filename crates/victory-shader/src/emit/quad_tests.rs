@@ -224,3 +224,31 @@ fn quad_reads_reach_the_helpers_along_a_triangle_edge() {
         [value(x, y), value(x ^ 1, y), value(x, y ^ 1), value(x & !1, y & !1)]
     });
 }
+
+/// A waterfall loop over a number each pixel has (its column): every lane
+/// takes the first lane's number and does its part when it is its own. A
+/// helper lane leaves the loop too, with its own number, which its
+/// neighbour then reads.
+#[test]
+fn helper_lanes_leave_a_waterfall_loop_with_their_own_value() {
+    let mut words = computed();
+    words.extend([
+        0x7E08_0F02, // v_cvt_u32_f32 v4, v2
+        0xBE88_037E, // s_mov_b32 s8, exec_lo
+        // the loop
+        0x7E04_0504, // v_readfirstlane_b32 s2, v4
+        0x7D84_0802, // v_cmp_eq_u32 vcc_lo, s2, v4
+        0xBE83_3C6A, // s_and_saveexec_b32 s3, vcc_lo
+        0x7E0A_0C02, // v_cvt_f32_u32 v5, s2
+        0x897E_037E, // s_xor_b32 exec_lo, exec_lo, s3
+        0xBF89_FFFA, // s_cbranch_execnz the loop
+        0xBEFE_0308, // s_mov_b32 exec_lo, s8
+        0x7E08_0D04, // v_cvt_f32_u32 v4, v4
+    ]);
+    // v4 = the column + 1, so that column 0 is told from what is not drawn.
+    words.push(3 << 25 | 4 << 17 | 4 << 9 | 242); // v_add_f32 v4, 1.0, v4
+    words.extend(quad_perm(6, 5, [1, 0, 3, 2]));
+    words.extend(quad_perm(7, 5, [2, 3, 0, 1]));
+    words.extend([0xF800_180F, 0x0706_0504, 0xBF81_0000]); // exp mrt0 v4..v7 done vm
+    check(&words, |x, _| [x as f32 + 1.0, x as f32, (x ^ 1) as f32, x as f32]);
+}

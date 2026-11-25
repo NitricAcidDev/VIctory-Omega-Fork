@@ -4374,6 +4374,27 @@ impl<'a> Lower<'a> {
         (self.s.m.select(c, any, at, first), any)
     }
 
+    /// `v_readfirstlane_b32`'s result `first` of `own`: a pixel program's
+    /// helper lane takes its own value instead.
+    ///
+    /// On the console helper lanes are in EXEC (whole-quad mode), so a
+    /// waterfall loop (read the first lane's value, run the lanes with that
+    /// value, take them out of EXEC) serves them too. On the host, wave
+    /// operations leave helper lanes out: with only helper lanes left in
+    /// such a loop no lane has the value read, and the loop runs to its
+    /// limit in each of them, draw after draw (Marvisak/VIctory 0601955: 0.3
+    /// to 1.3 s a draw, then the device hung). With its own value a helper
+    /// lane matches in its first pass and leaves; what it computes only
+    /// feeds derivatives, and its stores are dropped.
+    fn helper_reads_own(&mut self, own: V, first: V) -> V {
+        if !self.s.pixel {
+            return first;
+        }
+        let c = self.cur;
+        let helper = self.s.op(c, "isHelperLane.i1", Attr::ReadOnly, self.s.t.i1, 221, &[]);
+        self.s.m.select(c, helper, own, first)
+    }
+
     fn read_lane(&mut self, x: V, lane: V) -> V {
         self.s.op(
             self.cur,
@@ -7974,6 +7995,7 @@ impl<'a> Lower<'a> {
             "v_readfirstlane_b32" => {
                 let a = s(self, 0)?;
                 let (mine, any) = self.first_lane(a, guard);
+                let mine = self.helper_reads_own(a, mine);
                 // two host waves that exchange: the console's first lane may be in the other
                 // one, unless every lane holds the same value
                 let alike = match v.src.first() {
@@ -9642,8 +9664,29 @@ impl<'a> Lower<'a> {
                 } else if f16 {
                     let f = half(self, h)?.ok_or("a packed input half no element holds")?;
                     let lo = to_f16(self, f);
-                    self.low_half(inst, reg, lo)
-                } else if matches!(eval, Eval::Mode(1)) {
+                    if let Fields::Valu(v) = &inst.fields
+                        && (v.omod != 0 || v.clamp || v.opsel & 8 != 0)
+                    {
+                        // Output modifiers, and the half it writes: bit 3
+                        // of op_sel (Marvisak/VIctory e29391f).
+                        let lo = self.half_modifiers(inst, lo);
+                        let (high, low, k16) = (self.s.m.i32(0xFFFF_0000), self.s.m.i32(0xFFFF), self.s.m.i32(16));
+                        let old = match inst.read(Reg::V(reg)).map(|o| self.i32_of(o)) {
+                            Some(Ok(o)) => o,
+                            _ => self.s.m.i32(0),
+                        };
+                        let lo = self.s.m.bin(c, Bin::And, lo, low);
+                        if v.opsel & 8 != 0 {
+                            let old = self.s.m.bin(c, Bin::And, old, low);
+                            let x = self.s.m.bin(c, Bin::Shl, lo, k16);
+                            self.s.m.bin(c, Bin::Or, old, x)
+                        } else {
+                            let old = self.s.m.bin(c, Bin::And, old, high);
+                            self.s.m.bin(c, Bin::Or, old, lo)
+                        }
+                    } else {
+                        self.low_half(inst, reg, lo)
+                    }                } else if matches!(eval, Eval::Mode(1)) {
                     // The whole dword of a flat input: both halves.
                     let h = 2 * attribute.channel;
                     let z = self.s.m.i32(0);
@@ -9774,6 +9817,29 @@ impl<'a> Lower<'a> {
         let old = self.s.m.bin(c, Bin::And, old, high);
         let x = self.s.m.bin(c, Bin::And, x, low);
         self.s.m.bin(c, Bin::Or, old, x)
+    }
+
+    /// The output modifiers of a 16-bit float result `h` (omod, then clamp),
+    /// applied in f32 so that the half conversion rounds once.
+    fn half_modifiers(&mut self, inst: &Inst, h: V) -> V {
+        let Fields::Valu(v) = &inst.fields else {
+            return h;
+        };
+        if v.omod == 0 && !v.clamp {
+            return h;
+        }
+        let c = self.cur;
+        let f32t = self.s.t.f32;
+        let mut f = self.s.op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[h]);
+        if v.omod != 0 {
+            let factor = [1.0f32, 2.0, 4.0, 0.5][usize::from(v.omod & 3)];
+            let k = self.s.m.f32(factor.to_bits());
+            f = self.s.m.bin(c, Bin::Mul, f, k);
+        }
+        if v.clamp {
+            f = self.unary(7, f);
+        }
+        self.s.op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[f])
     }
 
     fn image(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {
@@ -11331,7 +11397,9 @@ impl<'a> Lower<'a> {
         });
         let mut indices = [z; 3];
         for (k, slot) in indices.iter_mut().enumerate() {
-            let (shift, mask) = (self.s.m.i32(10 * k as u32), self.s.m.i32(0x3FF));
+            // Nine bits; the tenth is the corner's edge flag, no part of
+            // its number (Marvisak/VIctory c0228d9).
+            let (shift, mask) = (self.s.m.i32(10 * k as u32), self.s.m.i32(0x1FF));
             let i = self.s.m.bin(c, Bin::LShr, x, shift);
             let i = self.s.m.bin(c, Bin::And, i, mask);
             if let Some(n) = written {

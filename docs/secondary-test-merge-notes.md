@@ -6,6 +6,23 @@ timing lines of local runs; nothing of the game is quoted.
 
 ## What was done
 
+Later on 25 November, Codex merged fxceless `9c184b3` into `primary`
+(AI-assisted). This adds optional texture readback, small-buffer placement
+controls, changed-run masks, and optional four-dword shader loads. Existing
+readback layouts, ranged mapping leases, buffer read locks, root SRV/UAV
+offsets, and streaming fixes are preserved. New readback diagnostics use
+ranged leases. The wide-load path retains the selected view's byte bias.
+Its helpers live in `emit/raw_loads.rs` to keep `lower.rs` under 512 KiB.
+
+Validation on RTX 5080, driver 617.42: 257 GPU tests, 257 shader tests, and
+195 remaining workspace tests passed. The optional wide-load scalar, UAV,
+and unaligned-view cases also passed. Clippy completed with warnings, asset
+policy passed, and the diagnostics executable was rebuilt. Not run with
+the title. Shader source changes invalidate old translations; caches are
+retained, and matching host pipelines can still load from their library.
+`VICTORY_TEXTURE_BACK`, small-buffer card placement, and shader option bit
+64 retain upstream's opt-in defaults. No frame-rate gain is claimed here.
+
 `secondary-test` took `primary` (`ccf29aa`) and was then fast-forwarded onto
 it: the two are one commit. Work goes on `primary`.
 

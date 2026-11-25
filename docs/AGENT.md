@@ -80,8 +80,11 @@ F="--locked --offline -j 14"
 "$CARGO" build --profile diag -p victory --features diagnostics,blake3/pure $F
 ```
 
-Last full run of `primary`: GPU 256 (`4d52524`), shader 256, others 194 passed,
-policy ok. A change in `victory-shader` (not in `*_tests.rs`) makes
+Last full run of `primary`, after merging fxceless `9c184b3`: GPU 257,
+shader 257, others 195 passed, policy ok; Clippy completed with warnings.
+The diagnostics exe was rebuilt. Optional wide-load scalar, UAV, and
+unaligned-view tests passed too. Not run with the title. Details are in
+the merge notes. A change in `victory-shader` (not in `*_tests.rs`) makes
 the first start translate every shader again.
 
 After any merge, look at what it **removes**, not only at conflicts: the last

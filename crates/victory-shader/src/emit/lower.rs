@@ -25,6 +25,9 @@ use crate::structure::{Atom, Bool, LaneExit, Structured};
 #[path = "intersect.rs"]
 pub(super) mod intersect;
 
+#[path = "raw_loads.rs"]
+mod raw_loads;
+
 type Why = &'static str;
 
 /// How an interpolation evaluates an input channel.
@@ -1748,6 +1751,12 @@ impl<'a> Lower<'a> {
                 }
             }
         };
+        if let (None, Some(h), true) = (sub, h, n > 1 && Self::wide_loads()) {
+            for (k, x) in self.raw_dwords(h, off, n).into_iter().enumerate() {
+                self.write(inst, Reg::V(reg + k as u8), x, guard);
+            }
+            return Ok(());
+        }
         for k in 0..n {
             let x = match sub {
                 None => {
@@ -5708,7 +5717,12 @@ impl<'a> Lower<'a> {
             let at = self.begin_guarded(Some(is_buffer));
             let h = self.handle(site, src, false, (11, 0))?;
             let mut raw = Vec::new();
-            for k in 0..count {
+            let wide = Self::wide_loads();
+            if wide {
+                let dwords = self.raw_dwords(h, raw_addr, count);
+                raw.extend(dwords.into_iter().map(|x| (x, zero)));
+            }
+            for k in 0..if wide { 0 } else { count } {
                 let b = self.cur;
                 let off = self.s.m.i32(4 * k);
                 let a = self.s.m.bin(b, Bin::Add, raw_addr, off);
@@ -5754,6 +5768,12 @@ impl<'a> Lower<'a> {
                 addr = self.s.m.bin(c, Bin::Add, addr, bias);
             }
             let h = self.handle(site, src, false, (if uav { 0x100b } else { 11 }, 0))?;
+            if Self::wide_loads() {
+                for (k, x) in self.raw_dwords(h, addr, count).into_iter().enumerate() {
+                    self.write(inst, Reg::S(code + k as u8), x, None);
+                }
+                return Ok(());
+            }
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
                 let a = self.s.m.bin(c, Bin::Add, addr, off);

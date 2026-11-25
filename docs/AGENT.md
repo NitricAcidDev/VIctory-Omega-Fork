@@ -141,7 +141,8 @@ translator 309, host 257, others pass. **Not run with the title yet.**
 
 Launchers: `(ray tracing test)` sets `VICTORY_BVH_BUILDER=1`;
 `(ray tracing build, rays off)` is the same exe without it, in which the seven
-compute programs the card's driver refuses run in the paired form. Both use
+compute programs the card's driver refuses should run in the paired form (as
+#994 reports; not seen here). Both use
 their own cache (`cache-ray-tracing`) and a copy of the saves
 (`data-ray-tracing`), made once.
 

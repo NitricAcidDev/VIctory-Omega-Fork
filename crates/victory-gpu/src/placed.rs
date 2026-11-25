@@ -63,8 +63,9 @@ pub(crate) fn counts() -> [u64; 4] {
 }
 
 /// The heaps textures are placed in now, and how much of each is given out:
-/// one for textures that start on 4 KiB, one for the others.
-static OPEN: Mutex<[Option<(Arc<Heap>, u64)>; 2]> = Mutex::new([None, None]);
+/// one for textures that start on 4 KiB, one for the others; the same two in
+/// the PC's memory ([`shared_heap`]).
+static OPEN: Mutex<[Option<(Arc<Heap>, u64)>; 4]> = Mutex::new([None, None, None, None]);
 
 /// Heaps whose last texture went, to be let go outside that texture's own
 /// release.
@@ -179,11 +180,13 @@ pub(crate) fn let_go() {
 
 /// A texture described by `desc`, in `state`, in a heap with others; `None`
 /// if it is not one that can be (a target, depth or unordered access
-/// texture, several samples, too big) or is better not.
+/// texture, several samples, too big) or is better not. `shared`: in the
+/// PC's memory ([`shared_heap`]).
 pub(crate) fn create(
     device: &ID3D12Device,
     desc: &D3D12_RESOURCE_DESC,
     state: D3D12_RESOURCE_STATES,
+    shared: bool,
 ) -> Option<ID3D12Resource> {
     const WRITTEN: i32 = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0
         | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0
@@ -228,14 +231,14 @@ pub(crate) fn create(
         PLACED[1].fetch_add(1, Ordering::Relaxed);
         return None;
     }
-    let kind = usize::from(alignment == BLOCK);
+    let kind = usize::from(alignment == BLOCK) + 2 * usize::from(shared);
     let room = open[kind]
         .as_ref()
         .map(|(heap, used)| (heap.clone(), used.next_multiple_of(alignment)))
         .filter(|(_, at)| at + bytes <= HEAP);
     let (heap, at) = match room {
         Some(room) => room,
-        None => (Arc::new(make_heap(device)?), 0),
+        None => (Arc::new(make_heap(device, shared)?), 0),
     };
     let mut made: Option<ID3D12Resource> = None;
     // SAFETY: the range lies in the heap and is no other texture's.
@@ -268,12 +271,28 @@ fn small_enough(desc: &D3D12_RESOURCE_DESC) -> bool {
     desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && layer <= BLOCK
 }
 
-fn make_heap(device: &ID3D12Device) -> Option<Heap> {
+/// A heap in the PC's memory that the card reads and writes over the bus
+/// and the CPU does not see, so that textures in it have the card's own
+/// layout.
+pub(crate) fn shared_heap() -> D3D12_HEAP_PROPERTIES {
+    D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_CUSTOM,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_L0,
+        ..Default::default()
+    }
+}
+
+fn make_heap(device: &ID3D12Device, shared: bool) -> Option<Heap> {
     let desc = D3D12_HEAP_DESC {
         SizeInBytes: HEAP,
-        Properties: D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_DEFAULT,
-            ..Default::default()
+        Properties: if shared {
+            shared_heap()
+        } else {
+            D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_DEFAULT,
+                ..Default::default()
+            }
         },
         Alignment: BLOCK,
         // (Zeroed: see the head of this file.)
@@ -321,6 +340,97 @@ mod tests {
     /// reads zeros; and the heaps go with their last texture.
     #[test]
     fn textures_in_shared_heaps_keep_their_own_texels() {
+        keep_their_own_texels(false);
+    }
+
+    /// The same in the PC's memory, which the card reads over the bus.
+    #[test]
+    fn textures_in_the_pcs_memory_keep_their_own_texels() {
+        keep_their_own_texels(true);
+    }
+
+    /// A texture too big to be placed is made there on its own, and counts as
+    /// the PC's memory, not the card's.
+    #[test]
+    fn big_textures_are_made_in_the_pcs_memory_too() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(host) = crate::host::host() else { return };
+        let before = host.video_memory();
+        let made: Vec<Option<ID3D12Resource>> = [DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM]
+            .into_iter()
+            .map(|format| {
+                let mut texture = None;
+                // SAFETY: plain creation.
+                unsafe {
+                    host.device
+                        .CreateCommittedResource(
+                            &shared_heap(),
+                            D3D12_HEAP_FLAG_NONE,
+                            &desc(4096, 13, format),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            None,
+                            &mut texture,
+                        )
+                        .expect("a texture in the PC's memory");
+                }
+                texture
+            })
+            .collect();
+        assert!(made.iter().all(Option::is_some));
+        if let (Some(before), Some(after)) = (before, host.video_memory()) {
+            // 133 MiB of them: 4/3 of 16, 16 and 64.
+            let (own, shared) = (after[1].saturating_sub(before[1]) >> 20, after[3].saturating_sub(before[3]) >> 20);
+            println!("made: {own} MB more of the card's memory, {shared} MB more of the PC's");
+            assert!(own < 64, "{own} MB on the card");
+            assert!(shared > 100, "{shared} MB in the PC's");
+        }
+        assert_eq!(crate::descriptor::host::device_removed(), None);
+    }
+
+    /// What it costs to fill and to copy out textures in the card's memory
+    /// and in the PC's.
+    #[test]
+    #[ignore = "benchmark"]
+    fn what_textures_in_the_pcs_memory_cost() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(host) = crate::host::host() else { return };
+        for shared in [false, true] {
+            let mut rig = crate::inplace::Rig::new(&host.device).unwrap();
+            let d = desc(1024, 1, DXGI_FORMAT_BC7_UNORM);
+            const N: usize = 256;
+            let began = std::time::Instant::now();
+            let textures: Vec<_> = (0..N)
+                .map(|_| create(&host.device, &d, D3D12_RESOURCE_STATE_COPY_DEST, shared).expect("placed"))
+                .collect();
+            let made = began.elapsed();
+            let target = create(&host.device, &d, D3D12_RESOURCE_STATE_COPY_DEST, false).expect("placed");
+            // Every one copied into one on the card: what a full sample of
+            // it reads, at least.
+            rig.run(|list| unsafe {
+                for t in &textures {
+                    list.ResourceBarrier(&[crate::host::transition(t, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                }
+            })
+            .unwrap();
+            let began = std::time::Instant::now();
+            for _ in 0..4 {
+                rig.run(|list| unsafe {
+                    for t in &textures {
+                        list.CopyResource(&target, t);
+                    }
+                })
+                .unwrap();
+            }
+            let read = began.elapsed();
+            println!(
+                "{}: {N} textures of 1 MiB made in {made:?}; read at {:.1} GB/s",
+                if shared { "the PC's memory" } else { "the card's memory" },
+                (4 * N) as f64 / 1024.0 / read.as_secs_f64()
+            );
+        }
+    }
+
+    fn keep_their_own_texels(shared: bool) {
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(host) = crate::host::host() else { return };
         let before = counts();
@@ -335,7 +445,7 @@ mod tests {
         let textures: Vec<ID3D12Resource> = (0..N)
             .map(|i| {
                 let (side, format) = formats[i % formats.len()];
-                create(&host.device, &desc(side, 1, format), D3D12_RESOURCE_STATE_COPY_DEST).expect("placed")
+                create(&host.device, &desc(side, 1, format), D3D12_RESOURCE_STATE_COPY_DEST, shared).expect("placed")
             })
             .collect();
         let after = counts();
@@ -421,7 +531,7 @@ mod tests {
         drop(textures);
         for _ in 0..500 {
             let_go();
-            if counts()[0] <= before[0] + 2 * HEAP && counts()[1] <= before[1] {
+            if counts()[0] <= before[0] + 4 * HEAP && counts()[1] <= before[1] {
                 break;
             }
             // (Submissions of other tests may be running.)
@@ -430,7 +540,7 @@ mod tests {
             host.execute(&[&list]);
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        assert!(counts()[0] <= before[0] + 2 * HEAP, "{:?} {before:?}", counts());
+        assert!(counts()[0] <= before[0] + 4 * HEAP, "{:?} {before:?}", counts());
         assert_eq!(crate::descriptor::host::device_removed(), None);
     }
 
@@ -450,17 +560,17 @@ mod tests {
                 Flags: flags,
                 ..desc(64, 1, DXGI_FORMAT_R8G8B8A8_UNORM)
             };
-            assert!(create(&host.device, &d, state).is_none());
+            assert!(create(&host.device, &d, state, false).is_none());
         }
-        assert!(create(&host.device, &desc(4096, 1, DXGI_FORMAT_R8G8B8A8_UNORM), state).is_none());
+        assert!(create(&host.device, &desc(4096, 1, DXGI_FORMAT_R8G8B8A8_UNORM), state, false).is_none());
         let small = desc(256, 9, DXGI_FORMAT_BC7_UNORM);
-        let kept = create(&host.device, &small, state).expect("placed");
+        let kept = create(&host.device, &small, state, false).expect("placed");
         // (As if so much of the heaps were unused.)
         HELD.fetch_add(4 << 30, Ordering::Relaxed);
-        let refused = create(&host.device, &small, state);
+        let refused = create(&host.device, &small, state, false);
         HELD.fetch_sub(4 << 30, Ordering::Relaxed);
         assert!(refused.is_none());
-        assert!(create(&host.device, &small, state).is_some());
+        assert!(create(&host.device, &small, state, false).is_some());
         drop(kept);
     }
 
@@ -478,7 +588,7 @@ mod tests {
             })
             .collect();
         let started = std::time::Instant::now();
-        let placed: Vec<_> = descs.iter().map(|d| create(&host.device, d, state)).collect();
+        let placed: Vec<_> = descs.iter().map(|d| create(&host.device, d, state, false)).collect();
         let took = started.elapsed();
         let [held, live, ..] = counts();
         let made = placed.iter().flatten().count();

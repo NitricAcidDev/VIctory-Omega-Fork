@@ -750,6 +750,14 @@ fn log_memory() {
         mb(card[3]),
     );
     let [heaps, live, placed, instead] = crate::placed::counts();
+    let spilled = crate::resource::SPILLED.each_ref().map(|n| n.load(std::sync::atomic::Ordering::Relaxed));
+    if spilled[0] != 0 {
+        tracing::info!(
+            "textures made in the PC's memory since the start (VICTORY_TEXTURE_SPILL): {}, {} MB",
+            spilled[0],
+            spilled[1] >> 20
+        );
+    }
     tracing::info!(
         "textures in shared heaps: {:.0} MB of heaps, {:.0} MB of textures in them; {placed} placed since the start, \
          {instead} made on their own for the heaps' waste (VICTORY_PLACED_WASTE_MB)",

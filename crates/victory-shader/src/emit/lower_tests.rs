@@ -829,3 +829,38 @@ fn scalar_dynamic_offset_wraps_vgpr_input_and_phi_in_wave_read_lane_first() {
         "code_smem must emit waveReadLaneFirst.i32 for VGPR-phi dynamic offset"
     );
 }
+
+/// The words of a descriptor read beside it (a record count) come from a
+/// load of another width at the same place of the table (NitricAcidDev,
+/// after DexNom).
+#[test]
+fn descriptor_data_reuses_a_different_width_load_at_the_same_table_address() {
+    let words = [
+        0xBE84_0300, // s_mov_b32 s4, s0
+        0xBE85_0380, // s_mov_b32 s5, 0
+        0xF408_0202,
+        0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], 0
+        0xF40C_0402,
+        0xFA00_0000, // s_load_dwordx8 s[16:23], s[4:5], 0
+        0xE030_2000,
+        0x8002_0100, // buffer_load_dword v1, v0, s[8:11], 0 idxen
+        0x7E04_0212, // v_mov_b32 v2, s18 (record count)
+        0xD834_0000,
+        0x0000_0100, // ds_write_b32 v0, v1
+        0xD834_0004,
+        0x0000_0200, // ds_write_b32 v0, v2 offset:4
+        S_ENDPGM,
+    ];
+    let layout = vec![root(RootType::Table, 0, 0)];
+    let used = vec![UsedResource {
+        kind: ResourceType::Srv,
+        root: RootType::Table,
+        table_offset_dwords: 0,
+        lower_bound: 0,
+        stride: 4,
+        dwords: 4,
+        user_data: 0,
+        slot: 0,
+    }];
+    lower_with(&words, layout, used).unwrap();
+}

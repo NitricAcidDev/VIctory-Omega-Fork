@@ -4174,6 +4174,7 @@ mod tests {
     /// again from the next frame; a stale slot leaves the queue.
     #[test]
     fn remapped_memory_makes_its_texture_slots_due() {
+        let _one = REMAP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(heap) = HostHeap::new(false, 8) else {
             return; // no host GPU
         };
@@ -4240,11 +4241,15 @@ mod tests {
         assert_eq!(slots(frame + 3 + TABLED_FRAMES), [2]);
     }
 
+    /// The tests that take what [`remapped`] noted (one list for all heaps).
+    static REMAP_TESTS: Mutex<()> = Mutex::new(());
+
     /// Memory that changes under a texture a table showed lately is looked
     /// at: after the grace frames, if no draw reads the slot through a
     /// table again, which brings it up to date.
     #[test]
     fn memory_mapped_under_a_tables_texture_makes_it_due_after_its_draws_had_their_turn() {
+        let _one = REMAP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(heap) = HostHeap::new(false, 8) else {
             return; // no host GPU
         };
@@ -4259,12 +4264,8 @@ mod tests {
             heap.tabled_in(slot, true, frame);
         }
         assert_eq!(slots(u64::MAX), [], "read through tables: up to date");
-        // (Another test's heap may take the range first.)
-        let due = (0..1000).find_map(|_| {
-            remapped(at as usize, 0x1000);
-            Some(heap.texture_slots_remapped(frame + 2)).filter(|&n| n > 0)
-        });
-        assert_eq!(due, Some(2));
+        remapped(at as usize, 0x1000);
+        assert_eq!(heap.texture_slots_remapped(frame + 2), 2);
         // A draw reads slot 3 through its table again; none reads slot 2.
         heap.tabled_in(3, true, frame + 3);
         assert_eq!(slots(frame + 2 + TABLED_GRACE - 1), []);

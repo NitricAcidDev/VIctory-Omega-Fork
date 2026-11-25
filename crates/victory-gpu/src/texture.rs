@@ -77,7 +77,60 @@ pub(crate) struct Staging {
     /// recorded a copy from it are its last use, so what it was detiled from
     /// need not be known afterwards.
     parting: std::sync::atomic::AtomicBool,
+    /// Whether its memory keeps changing.
+    lively: Lively,
 }
+
+/// Whether a texture's memory keeps changing: a movie's picture, the text
+/// and pictures laid over a cutscene (the opening's credits), an atlas the
+/// title draws into itself.
+#[derive(Default)]
+struct Lively {
+    /// When it was last found changed ([`crate::host::moment`]; 0: never).
+    at: std::sync::atomic::AtomicU64,
+    /// How often it was, each time soon after the one before.
+    times: std::sync::atomic::AtomicU32,
+}
+
+impl Lively {
+    /// Found changed now.
+    fn note(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let before = self.at.swap(crate::host::moment().max(1), Relaxed);
+        if before != 0 && !Self::past(before) {
+            self.times.fetch_add(1, Relaxed);
+        } else {
+            self.times.store(1, Relaxed);
+        }
+    }
+
+    /// Three seconds and twenty frames ago.
+    fn past(at: u64) -> bool {
+        crate::host::long_ago(at, 3000, 20)
+    }
+
+    /// Whether it changed at least four times, the last not long ago.
+    fn now(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.times.load(Relaxed) >= 4 && !Self::past(self.at.load(Relaxed))
+    }
+}
+
+/// Whether textures that keep changing are looked at by every submission
+/// that samples them and copied by the list that does. Otherwise (and with
+/// `VICTORY_LIVELY_TEXTURES=0`) a change no guard saw is found at every
+/// eighth frame only, and what a submission finds changed is copied by the
+/// next list that samples it: at three frames a second the picture is
+/// seconds and a frame behind, while the draw already asks for what is in
+/// its new place. (NitricAcidDev found this for the intro's movie: upload
+/// at every list until the first 3D frame, `VICTORY_INTRO_UPLOADS`.)
+fn lively_textures() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LIVELY_TEXTURES").is_none_or(|v| v != "0"))
+}
+
+/// The most bytes such a texture has.
+const LIVELY_MOST: u64 = 16 << 20;
 
 /// What a texture's staging buffer holds: the hash of the memory detiled
 /// (memory not watched), or the write-watch asking it was detiled after.
@@ -768,7 +821,7 @@ static INTRO_UPLOADS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static WORLD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn intro_uploads() -> bool {
-    *INTRO_UPLOADS.get_or_init(|| std::env::var_os("VICTORY_INTRO_UPLOADS").is_some_and(|v| v == "1"))
+    *INTRO_UPLOADS.get_or_init(|| std::env::var_os("VICTORY_INTRO_UPLOADS").is_none_or(|v| v != "0"))
         && !WORLD_STARTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -838,7 +891,8 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     // For the intro, record the copy even if staging is clean now.
     // Its submission-time refresh can see the next movie image after
     // the list has been recorded, and this copy can use it immediately.
-    if !intro_uploads() && staging.uploaded.load(Relaxed) && !staging.dirty.load(Relaxed) {
+    // So for a texture that keeps changing.
+    if !intro_uploads() && staging.uploaded.load(Relaxed) && !staging.dirty.load(Relaxed) && !staging.keeps_changing() {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexSkipped, 1);
         list.defer_texture(staging);
@@ -1205,7 +1259,7 @@ impl Staging {
             last.asked = now;
             let turn = crate::frame::current().wrapping_add((start >> 16) as u64).is_multiple_of(HASH_EVERY);
             observed_write = !unwritten;
-            if unwritten && !turn {
+            if unwritten && !turn && !self.keeps_changing() {
                 return 0;
             }
         }
@@ -1328,9 +1382,16 @@ impl Staging {
         (!parting).then(|| crate::quick::print(tiled))
     }
 
+    /// Whether the texture is looked at and copied as one that keeps
+    /// changing ([`lively_textures`]).
+    fn keeps_changing(&self) -> bool {
+        lively_textures() && self.bytes <= LIVELY_MOST && self.lively.now()
+    }
+
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
     fn detile(&self, tiled: &[u8]) {
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.lively.note();
         // Levels on demand: which levels are the title's is judged here,
         // once, for what the staging buffer holds from now on. The step
         // that gives levels their memory goes by this answer.
@@ -1739,6 +1800,7 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         judged: [const { std::sync::atomic::AtomicU64::new(0) }; 2],
         waiting: std::sync::atomic::AtomicU64::new(0),
         parting: std::sync::atomic::AtomicBool::new(false),
+        lively: Lively::default(),
     });
     map.insert(resource as usize, s.clone());
     add_to_address_index(&s);
@@ -1792,7 +1854,27 @@ mod remap_tests {
 
 #[cfg(test)]
 mod title_memory_tests {
-    use super::with_title;
+    use super::{Lively, with_title};
+
+    /// A texture whose memory was found changed four times in a row keeps
+    /// changing; one that streams in once, or changed long ago, does not.
+    #[test]
+    fn a_texture_that_changed_again_and_again_keeps_changing() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let l = Lively::default();
+        assert!(!l.now());
+        for _ in 0..3 {
+            l.note();
+            assert!(!l.now());
+        }
+        l.note();
+        assert!(l.now());
+        // A change long after the last one is the first again. (Moments of
+        // frame 0 count as long ago once the clock is twenty frames on.)
+        l.at.store(0, Relaxed);
+        l.note();
+        assert!(!l.now() && l.times.load(Relaxed) == 1);
+    }
 
     /// Title memory whose tail is reserved and not committed reads through
     /// the copy as its bytes and then zeros, without a fault; so does
@@ -2275,6 +2357,7 @@ mod pool_tests {
                     judged: [const { std::sync::atomic::AtomicU64::new(0) }; 2],
                     waiting: std::sync::atomic::AtomicU64::new(0),
                     parting: std::sync::atomic::AtomicBool::new(false),
+                    lively: Lively::default(),
                     used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
                 },
                 used,

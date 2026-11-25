@@ -1496,7 +1496,7 @@ unsafe impl Send for CardWork {}
 static CARD_WORK: Mutex<Option<CardWork>> = Mutex::new(None);
 
 /// The compare of a declared range of a copy in the card's memory with
-/// its bytes from before, one thread per 64 KiB piece (cut at multiples of
+/// its bytes from before, one thread group per 64 KiB piece (cut at multiples of
 /// 64 KiB of title memory, as `Shadow::card_piece` cuts them): `differs`
 /// gets a dword per piece, 1 where a byte differs. The offsets are widened
 /// to 16 bytes; buffers are multiples of 64 KiB, and a piece flagged for a
@@ -1516,24 +1516,41 @@ ByteAddressBuffer now : register(t0);
 // last sent up (or hashed whole, the first time).
 RWByteAddressBuffer hashes : register(u0);
 RWByteAddressBuffer differs : register(u1);
+groupshared uint4 partial_hash[64];
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= pieces) return;
-    uint piece = first + id.x;
+void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
+    uint index = group.x + group.y * 32768u;
+    if (index >= pieces) return;
+    uint piece = first + index;
     uint lo = piece * 65536u;
     lo = lo > skew ? lo - skew : 0u;
     uint hi = min((piece + 1u) * 65536u - skew, size);
     lo = lo & ~15u;
     hi = (hi + 15u) & ~15u;
-    uint4 h = uint4(0x9E3779B9u, 0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu);
+    const uint4 prime = uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
+    uint4 h = uint4(0x9E3779B9u, 0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu) ^ (lane * prime);
+    // Read consecutive blocks across the group, then combine the lane
+    // hashes in a fixed order. Store and compare use the same fingerprint.
     [loop]
-    for (uint at = lo; at < hi; at += 16u) {
-        h = (h ^ now.Load4(at)) * uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
+    for (uint at = lo + lane * 16u; at < hi; at += 1024u) {
+        h = (h ^ now.Load4(at)) * prime;
         h = h.yzwx ^ (h >> 15);
     }
+    partial_hash[lane] = h;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            h = (h ^ partial_hash[lane + stride].wxyz) * prime;
+            h = h.yzwx ^ (h >> 15);
+            partial_hash[lane] = h;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane != 0u) return;
     if (compare != 0u) {
-        differs.Store(out_at + id.x * 4u, any(h != hashes.Load4(piece * 16u)) ? 1u : 0u);
+        differs.Store(out_at + index * 4u, any(h != hashes.Load4(piece * 16u)) ? 1u : 0u);
         // With the copy-back on its own thread: the next compare of the
         // piece finds what is written from here on.
         if (compare == 2u) hashes.Store4(piece * 16u, h);
@@ -1543,21 +1560,25 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
+/// Grid for the compare shader, whose rows hold 32,768 groups.
+pub(crate) fn card_compare_grid(pieces: u32) -> (u32, u32) {
+    const ROW: u32 = 32_768;
+    (pieces.min(ROW), pieces.div_ceil(ROW))
+}
+
 /// Whether the pieces hashed again after ranges were sent up to a copy in
 /// the card's memory are hashed in runs of pieces that touch, each piece
-/// once (`VICTORY_CARD_REHASH_RUNS=1`; off by default), and not in a pass
+/// once (disable with `VICTORY_CARD_REHASH_RUNS=0`), and not in a pass
 /// per range sent up.
 ///
 /// These passes are ours, they run on the card before every submission's
-/// lists, and no timing so far names them: each walks its 64 KiB pieces
-/// 16 bytes at a time, 4,096 steps one after the other, so a pass takes
-/// the time of one piece however few its pieces are. Run 102 sent up 514
+/// lists, and repeated passes add dispatch overhead even when they hash very few pieces. Run 102 sent up 514
 /// ranges a frame: 514 such passes. The same pieces are hashed either way;
 /// a piece hashed when it need not be, or not hashed when it should, costs
 /// a fetch that finds nothing and loses no shader write.
 fn rehash_runs() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_REHASH_RUNS").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_REHASH_RUNS").is_none_or(|v| v != "0"))
 }
 
 /// Since the last frame-rate line, of our own passes over copies in the
@@ -1639,6 +1660,8 @@ struct Deferred {
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
+    /// Each pipeline and its root signature, kept once per recording.
+    bound_pipelines: std::collections::HashMap<usize, (ID3D12PipelineState, ID3D12RootSignature)>,
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
@@ -1877,9 +1900,38 @@ fn flagged_pieces(flags: &[(usize, u32, bool)]) -> std::collections::HashSet<(us
     flags.iter().filter(|f| f.2).map(|f| (f.0, f.1)).collect()
 }
 
+/// Coalesce adjacent readback pieces when the source and destination both
+/// continue the preceding copy. CPU merging still uses the original pieces.
+fn readback_runs<T: PartialEq>(
+    pieces: impl IntoIterator<Item = (T, usize, usize, u64)>,
+    mut copy: impl FnMut(T, usize, usize, u64),
+) {
+    let mut pieces = pieces.into_iter();
+    let Some((mut source, mut start, mut end, mut destination)) = pieces.next() else {
+        return;
+    };
+    for (next_source, next_start, next_end, next_destination) in pieces {
+        if source == next_source && end == next_start && destination + (end - start) as u64 == next_destination {
+            end = next_end;
+        } else {
+            copy(source, start, end, destination);
+            (source, start, end, destination) = (next_source, next_start, next_end, next_destination);
+        }
+    }
+    copy(source, start, end, destination);
+}
+
 #[cfg(test)]
 mod relay_tests {
-    use super::{flagged_pieces, landable};
+    use super::{flagged_pieces, landable, readback_runs};
+
+    #[test]
+    fn readback_runs_require_contiguous_source_and_destination() {
+        let pieces = [(1, 4, 8, 0), (1, 8, 12, 4), (1, 16, 20, 8), (1, 20, 24, 20), (2, 24, 28, 24)];
+        let mut runs = Vec::new();
+        readback_runs(pieces, |source, start, end, destination| runs.push((source, start, end, destination)));
+        assert_eq!(runs, [(1, 4, 12, 0), (1, 16, 20, 8), (1, 20, 24, 20), (2, 24, 28, 24)]);
+    }
 
     /// Two flights and what follows each: nothing of the second lands
     /// before the card has run it, and nothing behind a flight lands
@@ -3131,7 +3183,8 @@ impl Host {
                         for run in runs {
                             let constants = [run.first, run.skew, size as u32, run.pieces, 0, 0];
                             list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
-                            list.Dispatch(run.pieces.div_ceil(64), 1, 1);
+                            let (x, y) = card_compare_grid(run.pieces);
+                            list.Dispatch(x, y, 1);
                         }
                     }
                     list.Close()?;
@@ -3216,7 +3269,8 @@ impl Host {
                         list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                         list.SetComputeRootShaderResourceView(1, r.shadow.buffer.GetGPUVirtualAddress());
                         list.SetComputeRootUnorderedAccessView(2, before.GetGPUVirtualAddress());
-                        list.Dispatch(r.span.pieces.div_ceil(64), 1, 1);
+                        let (x, y) = card_compare_grid(r.span.pieces);
+                        list.Dispatch(x, y, 1);
                         CARD_PASSES[2].fetch_add(1, Ordering::Relaxed);
                     }
                     list.Close()?;
@@ -3360,9 +3414,10 @@ impl Host {
             (|| -> windows::core::Result<u64> {
                 allocator.Reset()?;
                 list.Reset(&allocator, None)?;
-                for (shadow, lo, hi, at) in &pieces {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
-                }
+                readback_runs(
+                    pieces.iter().map(|(shadow, lo, hi, at)| (&shadow.buffer, *lo, *hi, *at)),
+                    |source, lo, hi, at| list.CopyBufferRegion(&buffer, at, source, lo as u64, (hi - lo) as u64),
+                );
                 list.Close()?;
                 let lists = [Some(list.cast::<ID3D12CommandList>()?)];
                 // In the order of the queue: the sends of title bytes so
@@ -3580,9 +3635,10 @@ impl Host {
                 (|| -> windows::core::Result<()> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
-                    for &(i, lo, hi, at) in &pieces {
-                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
-                    }
+                    readback_runs(
+                        pieces.iter().map(|&(i, lo, hi, at)| (&plan.ranges[i].shadow.buffer, lo, hi, at)),
+                        |source, lo, hi, at| list.CopyBufferRegion(fetched, at, source, lo as u64, (hi - lo) as u64),
+                    );
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
                     self.card_sent();
@@ -4883,6 +4939,7 @@ impl HostList {
             if !(deferred.copies.is_empty()
                 && deferred.uploads.is_empty()
                 && deferred.kept.is_empty()
+                && deferred.bound_pipelines.is_empty()
                 && deferred.textures.is_empty()
                 && deferred.writes.is_empty()
                 && deferred.backs.is_empty())
@@ -4894,8 +4951,19 @@ impl HostList {
             && self.twins.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
+    /// Hold a pipeline through execution, even if the title releases it.
+    pub(crate) fn keep_pipeline(&self, pso: &ID3D12PipelineState, root: &ID3D12RootSignature, name: &str) {
+        let mut deferred = self.deferred();
+        let std::collections::hash_map::Entry::Vacant(entry) = deferred.bound_pipelines.entry(pso.as_raw() as usize) else {
+            return;
+        };
+        entry.insert((pso.clone(), root.clone()));
+        drop(deferred);
+        self.used_pipeline(name);
+    }
+
     /// Notes a pipeline the list binds.
-    pub(crate) fn used_pipeline(&self, name: &str) {
+    fn used_pipeline(&self, name: &str) {
         let mut pipelines = self.pipelines.lock().unwrap_or_else(|e| e.into_inner());
         if !pipelines.contains(name) {
             pipelines.insert(name.to_owned());
@@ -5740,7 +5808,7 @@ impl Meter {
             if passes + compares > 0.0 {
                 tracing::info!(
                     "our passes over copies in the card's memory per frame: {passes:.0} hash passes over {pieces:.0} pieces after \
-                     ranges were sent up (VICTORY_CARD_REHASH_RUNS=1 joins them: now {}), {compares:.0} compare passes",
+                     ranges were sent up (batched rehash: {}), {compares:.0} compare passes",
                     if rehash_runs() { "on" } else { "off" }
                 );
             }
@@ -6003,7 +6071,11 @@ impl Host {
                 .then(|| crate::capture::read_back(&self.device, list, texture))
                 .flatten();
             #[cfg(feature = "diagnostics")]
-            let probe = if slot.is_some() { None } else { crate::capture::probe(&self.device, list, texture) };
+            let probe = if slot.is_none() && (!crate::capture::manual_only() || read_now) {
+                crate::capture::probe(&self.device, list, texture)
+            } else {
+                None
+            };
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             list.ResourceBarrier(&[

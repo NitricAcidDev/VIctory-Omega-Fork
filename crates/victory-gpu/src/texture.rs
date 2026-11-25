@@ -971,11 +971,13 @@ pub(crate) fn staged_memory(resource: This) -> Option<(u64, u64)> {
 }
 
 /// A fingerprint of the title memory `[at, at + len)`, never 0: of all of
-/// it up to 48 KiB, else of 16 KiB at its start, its middle and its end
-/// (a texture streams in whole mips; the small ones lie first). Read
+/// it up to 48 KiB, else of 12 windows spread across the allocation.
+/// This samples more mip regions at the same total read budget. Read
 /// through the kernel, so pages not there count as zeros.
 pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
-    const WINDOW: usize = 16 << 10;
+    const WINDOW: usize = 4 << 10;
+    const WINDOWS: usize = 12;
+    const BUDGET: usize = WINDOWS * WINDOW;
     thread_local! {
         static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -983,18 +985,21 @@ pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
     let mut hasher = blake3::Hasher::new();
     READ.with(|read| {
         let mut read = read.borrow_mut();
-        read.resize(3 * WINDOW, 0);
+        read.resize(BUDGET, 0);
         let mut take = |from: usize, bytes: usize| {
             read[..bytes].fill(0);
             crate::host::copy_mapped(read.as_mut_ptr(), (at as usize + from) as *const u8, bytes, false);
             hasher.update(&read[..bytes]);
         };
-        if len <= 3 * WINDOW {
+        if len <= BUDGET {
             take(0, len);
         } else {
-            take(0, WINDOW);
-            take((len / 2) & !0xfff, WINDOW);
-            take(len - WINDOW, WINDOW);
+            let last = len - WINDOW;
+            let stride = last / (WINDOWS - 1);
+            for i in 0..WINDOWS - 1 {
+                take(i * stride, WINDOW);
+            }
+            take(last, WINDOW);
         }
     });
     let hash = hasher.finalize();
@@ -1251,6 +1256,16 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
 #[cfg(test)]
 mod title_memory_tests {
     use super::with_title;
+
+    #[test]
+    fn texture_fingerprint_spots_changes_between_the_old_sample_regions() {
+        let mut bytes = vec![0u8; 1024 * 1024];
+        let original = super::fingerprint(bytes.as_ptr() as u64, bytes.len() as u64);
+        bytes[280 * 1024] = 0x7f;
+        assert_ne!(super::fingerprint(bytes.as_ptr() as u64, bytes.len() as u64), original);
+        bytes[280 * 1024] = 0;
+        assert_eq!(super::fingerprint(bytes.as_ptr() as u64, bytes.len() as u64), original);
+    }
 
     /// Title memory whose tail is reserved and not committed reads through
     /// the copy as its bytes and then zeros, without a fault; so does

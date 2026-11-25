@@ -906,10 +906,7 @@ impl State {
             // SAFETY: an open list and a live pipeline.
             unsafe { l.SetPipelineState(&p.pso) };
             self.host_pipeline = p.pso.as_raw() as usize;
-            list.used_pipeline(&p.name);
-            // The title may release the pipeline before it submits the list.
-            list.keep(&p.pso);
-            list.keep(&p.root);
+            list.keep_pipeline(&p.pso, &p.root, &p.name);
         }
         for stage in &p.stages {
             let t = stage.translated();
@@ -1507,9 +1504,8 @@ impl State {
         let room = crate::resource::room();
         if !room {
             HEAP_TEXTURES_FULL.fetch_add(1, Ordering::Relaxed);
-            once!("textures picked by index: the card has no room for more; they wait");
+            once!("textures picked by index: the card has no room for new allocations");
         }
-        let mut refused = 0;
         // Slots whose texture's memory the runtime mapped, unmapped or
         // wrote since the last pass are due again.
         host.texture_slots_remapped(frame);
@@ -1636,25 +1632,41 @@ impl State {
                 host.texture_slot_done(index, write, None);
                 continue;
             }
-            // From here on a host texture is made: not without room. The
-            // slot stays due.
-            if !room {
-                refused += 1;
-                if refused > 256 {
-                    break;
-                }
-                continue;
-            }
+            // Only new GPU allocations need headroom. Textures already on
+            // the card can finish streaming using their current allocation.
+            // Keep that allocation alive until the list has recorded its use.
+            let _resident = if room {
+                None
+            } else {
+                let Some(copy) = heap.handle(index)
+                    .and_then(crate::descriptor::view)
+                    .as_ref()
+                    .and_then(crate::descriptor::host::resident_texture)
+                else {
+                    continue;
+                };
+                Some(copy)
+            };
             let view = heap.handle(index).and_then(|handle| host.mirror(index, handle, true));
             let placed = view.as_ref().and_then(crate::descriptor::host::placed_texture);
             let resource = match placed.as_ref().or(view.as_ref()) {
                 Some(&View::Shader(resource, _)) => resource as This,
+                Some(View::Placed(false, resource, _)) if resource[0] != 1 => {
+                    // The view still names the texture. Retry if its host
+                    // copy could not be made yet.
+                    host.texture_slot_later(index, write, frame, most);
+                    continue;
+                }
                 _ => {
                     host.texture_slot_done(index, write, None);
                     continue;
                 }
             };
-            let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
+            let Some(host_resource) = crate::resource::host_resource(resource) else {
+                host.texture_slot_later(index, write, frame, most);
+                continue;
+            };
+            let title_fills = crate::texture::title_written(host_resource);
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);
@@ -1678,7 +1690,12 @@ impl State {
                 crate::host::log_removal_context();
                 return;
             }
-            let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
+            let Some((bytes, whole)) = crate::texture::staged(resource) else {
+                // Staging allocation can fail temporarily. Keep the slot
+                // queued so a later pass can upload it.
+                host.texture_slot_later(index, write, frame, most);
+                continue;
+            };
             // Not all of it there: looked at again next frame, and from
             // then on as a slot with nothing new (a placed texture: until
             // more of it is mapped; a texture object at an address the

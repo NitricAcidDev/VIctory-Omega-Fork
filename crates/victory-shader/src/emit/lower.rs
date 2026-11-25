@@ -5623,7 +5623,21 @@ impl<'a> Lower<'a> {
                 .filter(|(s, b)| *s != site && *b == a && same(*s))
                 .find_map(|(s, _)| use_of(*s))
         };
-        let use_at = use_of(site).or_else(twin);
+        // The data-only load can cover fewer (or more) dwords than the
+        // descriptor load. A fixed table address identifies the same
+        // descriptor when the other load uses it from its first dword.
+        let fixed_prefix = || {
+            let address = address.filter(|a| a.dynamic.is_none())?;
+            let root = x.native.layout.get(address.param)?;
+            if root.root != RootType::Table {
+                return None;
+            }
+            x.res.scalar.iter()
+                .filter(|(s, a)| *s != site && *a == address)
+                .filter_map(|(s, _)| use_of(*s))
+                .find(|(_, first)| *first == 0)
+        };
+        let use_at = use_of(site).or_else(twin).or_else(fixed_prefix);
         let Some((at, first)) = use_at else {
             // A descriptor kept per lane in VGPRs (`Resources::lane_copied`): the code only
             // copies its dwords and compares them, lane against first lane, and every load
@@ -11561,6 +11575,38 @@ mod tests {
             }]
         };
         lower_with(&words, layout(), used()).unwrap();
+    }
+
+    #[test]
+    fn descriptor_data_reuses_a_different_width_load_at_the_same_table_address() {
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], 0
+            0xF40C_0402,
+            0xFA00_0000, // s_load_dwordx8 s[16:23], s[4:5], 0
+            0xE030_2000,
+            0x8002_0100, // buffer_load_dword v1, v0, s[8:11], 0 idxen
+            0x7E04_0212, // v_mov_b32 v2, s18 (record count)
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            0xD834_0004,
+            0x0000_0200, // ds_write_b32 v0, v2 offset:4
+            S_ENDPGM,
+        ];
+        let layout = vec![root(RootType::Table, 0, 0)];
+        let used = vec![UsedResource {
+            kind: ResourceType::Srv,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 4,
+            dwords: 4,
+            user_data: 0,
+            slot: 0,
+        }];
+        lower_with(&words, layout, used).unwrap();
     }
 
     /// Tables of 2D textures at s0 and samplers at s1.

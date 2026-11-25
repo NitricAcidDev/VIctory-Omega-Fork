@@ -36,8 +36,8 @@ pub fn use_shader_cache(dir: PathBuf) {
 pub fn prepare_precompile(dir: PathBuf) -> Result<(), String> {
     crate::host::host().ok_or("no host D3D12 device")?;
     crate::descriptor::host::probe_view_limit();
-    use_shader_cache(dir);
-    Ok(())
+    let cache = Cache::open(dir).map_err(|error| format!("cannot open shader cache: {error:#}"))?;
+    CACHE.set(cache).map_err(|_| "shader cache is already initialized".to_owned())
 }
 
 /// Shaders found in the cache and translated since the start.

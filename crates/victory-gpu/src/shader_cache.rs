@@ -32,8 +32,16 @@ pub fn use_shader_cache(dir: PathBuf) {
     }
 }
 
+/// Initializes the same adapter-dependent shader settings used by a game run.
+pub fn prepare_precompile(dir: PathBuf) -> Result<(), String> {
+    crate::host::host().ok_or("no host D3D12 device")?;
+    crate::descriptor::host::probe_view_limit();
+    use_shader_cache(dir);
+    Ok(())
+}
+
 /// Shaders found in the cache and translated since the start.
-pub(crate) fn counts() -> (u64, u64) {
+pub fn counts() -> (u64, u64) {
     (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
 }
 
@@ -56,7 +64,7 @@ fn build() -> &'static [u8; 32] {
 
 /// The translation of a console shader container, from the cache when
 /// there is one.
-pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
+pub fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
         Some(cache) => cached(cache, build(), container, translate),
@@ -103,10 +111,12 @@ fn cached(
         let path = cache
             .get_or_convert(&converter, &input)
             .map_err(|e| format!("{e:#}"))?;
-        let entry = std::fs::read(&path).ok().and_then(|b| match b.strip_prefix(FAILED) {
-            Some(why) => String::from_utf8(why.to_vec()).ok().map(Err),
-            None => decode(&b).map(Ok),
-        });
+        let entry = std::fs::read(&path)
+            .ok()
+            .and_then(|b| match b.strip_prefix(FAILED) {
+                Some(why) => String::from_utf8(why.to_vec()).ok().map(Err),
+                None => decode(&b).map(Ok),
+            });
         if let Some(entry) = entry {
             let (counter, what) = if converter.ran.load(Ordering::Relaxed) {
                 (&MISSES, "translated and cached")

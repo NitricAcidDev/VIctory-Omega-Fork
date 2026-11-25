@@ -66,10 +66,14 @@ impl Cache {
         let written = file.write_all(&output);
         drop(file);
         let published = written.and_then(|()| std::fs::rename(&tmp, &path));
-        if published.is_err() {
+        if let Err(error) = published {
             let _ = std::fs::remove_file(&tmp);
+            // Another process may have published this same cache key while
+            // this converter ran. Its complete file is equally usable.
+            if !path.is_file() {
+                return Err(error.into());
+            }
         }
-        published?;
         Ok(path)
     }
 }

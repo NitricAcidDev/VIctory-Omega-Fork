@@ -428,7 +428,11 @@ pub(crate) static REFRESH_WAITS: [std::sync::atomic::AtomicU64; 4] = [const { st
 fn waited<T>(slot: usize, f: impl FnOnce() -> T) -> T {
     let started = std::time::Instant::now();
     let out = f();
-    REFRESH_WAITS[slot].fetch_add(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    let us = started.elapsed().as_micros() as u64;
+    REFRESH_WAITS[slot].fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+    if slot == 2 {
+        crate::framelog::add(crate::framelog::T::RefreshStillUs, us);
+    }
     out
 }
 
@@ -497,8 +501,8 @@ struct Spare {
     bytes: u64,
 }
 
-/// Staging buffers taken from [`SPARE`], and made.
-static POOLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+/// Staging buffers taken from [`SPARE`], and made, since the start.
+pub(crate) static POOLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 
 /// The most bytes kept while nothing uses them: a 32nd of the machine's
 /// memory, between 512 MiB and 2 GiB (a pass that catches up stages 576 MiB a
@@ -506,6 +510,11 @@ static POOLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::A
 fn spare_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MOST.get_or_init(|| {
+        // (fxceless/victory-gta6 has come to a pool of its own since; its
+        // switch is this one.)
+        if std::env::var_os("VICTORY_STAGING_POOL").is_some_and(|v| v == "0") {
+            return 0;
+        }
         let set = std::env::var("VICTORY_STAGING_POOL_MB")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok());
@@ -837,6 +846,7 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     }
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::TexUploads, 1);
+    crate::framelog::add(crate::framelog::T::Uploads, 1);
     const COPY_DEST: u32 = 0x400;
     crate::list::ensure_state(list, resource, COPY_DEST);
     // The staging buffer lives as long as `staging`, which the deferred
@@ -1135,7 +1145,9 @@ impl Staging {
     fn refresh_now(&self) -> usize {
         let whole = std::time::Instant::now();
         let read = self.refresh_timed();
-        REFRESH_WAITS[3].fetch_add(whole.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        let us = whole.elapsed().as_micros() as u64;
+        REFRESH_WAITS[3].fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+        crate::framelog::add(crate::framelog::T::RefreshUs, us);
         read
     }
 

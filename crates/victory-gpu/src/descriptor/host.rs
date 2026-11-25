@@ -4510,7 +4510,8 @@ mod tests {
     }
 
     /// Memory the runtime maps under a slot's texture makes the slot due
-    /// again from the next frame; a stale slot leaves the queue.
+    /// again, one a draw read through a table after its grace; a stale slot
+    /// leaves the queue.
     #[test]
     fn remapped_memory_makes_its_texture_slots_due() {
         let _one = REMAP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -4534,12 +4535,13 @@ mod tests {
         assert_eq!(slots(u64::MAX), []);
         // A past table read does not cover a later change to title memory.
         heap.tabled_in(1, true, 49);
-        // Memory elsewhere: nothing. Under the texture: due from the next frame.
+        // Memory elsewhere: nothing. Under the texture: due once the draws
+        // that read the slot's table have had their turn.
         remapped((at + 2 * len) as usize, 0x1000);
         remapped(at as usize, 0x1000);
         assert_eq!(heap.texture_slots_remapped(50), 1);
-        assert_eq!(slots(50), []);
-        assert_eq!(slots(51), [1]);
+        assert_eq!(slots(50 + TABLED_GRACE - 1), []);
+        assert_eq!(slots(50 + TABLED_GRACE), [1]);
         // A wider texture written at the same address: slot 1 is stale.
         assert_eq!(heap.note_buffer(2, Some(&view(at, 128)), false, true), [1]);
         assert_eq!(slots(u64::MAX), [2]);

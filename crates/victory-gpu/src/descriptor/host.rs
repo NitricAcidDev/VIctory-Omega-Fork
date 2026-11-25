@@ -1433,9 +1433,16 @@ impl HostHeap {
     /// (any more): a host slot made from it becomes null again, so that
     /// the host copy can be let go (`crate::resource::let_go_idle`; a slot
     /// keeps what it views). True if the slot was made.
-    pub(crate) fn texture_slot_gone(&self, index: u32) -> bool {
+    pub(crate) fn texture_slot_gone(&self, index: u32, write: u64) -> bool {
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         if made.get(index as usize).is_none_or(|&key| key == 0) {
+            return false;
+        }
+        // Mapping was checked outside these locks. A newer descriptor may
+        // have been mirrored, or a table read may have removed the entry.
+        // Mirror takes the made lock before updating the texture queue.
+        let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
+        if textures.same(index, write).is_none() {
             return false;
         }
         self.unmake(&mut made, index);
@@ -2611,9 +2618,10 @@ fn buffer_uav(
 /// view; the host refuses (and removes the device for) views without the
 /// resource's permission, of typed depth, and in another format than a
 /// typed resource's. A view of a typed texture in another format of its
-/// family takes the texture's format.
-/// shortcut: such a view (sRGB of UNORM, say) reads without its
-/// conversion; cast with castable formats if colors come out wrong.
+/// family takes the texture's format, except a shader view that asks for
+/// sRGB or linear on a host that allows the cast ([`keeps_gamma_view`]).
+/// shortcut: other such views (UINT of FLOAT, say) read as the texture's
+/// own format; the first few are logged.
 fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordered: bool) -> bool {
     use crate::resource::{DEPTH_FORMATS, family};
     // SAFETY: a live resource.
@@ -2664,10 +2672,39 @@ fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordere
     }
     if let Some(format) = format
         && !typeless
+        && !keeps_gamma_view(own, view, unordered)
     {
+        if view != own {
+            /// (texture, view, unordered) seen.
+            static SEEN: Mutex<Vec<(u32, u32, bool)>> = Mutex::new(Vec::new());
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if seen.len() < 32 && !seen.contains(&(own, view, unordered)) {
+                seen.push((own, view, unordered));
+                tracing::info!(texture_format = own, view_format = view, unordered, "a view reads as its texture's own format");
+            }
+        }
         *format = d.Format;
     }
     true
+}
+
+/// Whether a shader view in format `view` of a typed texture in format
+/// `own` keeps its own format: a view that picks sRGB or linear, on a host
+/// that allows views of typed textures in other formats of their family.
+/// Replacing the format there dropped the conversion (#578, pull request
+/// #644 for RGBA8): a colour map in UNORM viewed as sRGB read too bright,
+/// and a map of numbers (roughness, masks) in sRGB viewed as UNORM read too
+/// low, 0.5 as 0.21: rough surfaces came out glossy.
+/// Unordered access views have no sRGB on the host and stay as they were.
+fn keeps_gamma_view(own: u32, view: u32, unordered: bool) -> bool {
+    !unordered && gamma_pair(own, view) && host().is_some_and(|gpu| gpu.typed_format_casting())
+}
+
+/// Whether two formats differ in the sRGB conversion alone.
+fn gamma_pair(a: u32, b: u32) -> bool {
+    /// (sRGB, linear): RGBA8, BC1, BC2, BC3, BGRA8, BGRX8, BC7.
+    const PAIRS: [(u32, u32); 7] = [(29, 28), (72, 71), (75, 74), (78, 77), (91, 87), (93, 88), (99, 98)];
+    PAIRS.contains(&(a, b)) || PAIRS.contains(&(b, a))
 }
 
 /// The title's unordered access view of a depth texture, as a view of the
@@ -3482,6 +3519,208 @@ mod tests {
         assert!(spans.by_start.is_empty() && spans.by_slot.is_empty());
     }
 
+    /// A texture read through an sRGB or linear view gets that view's
+    /// conversion, whichever of the two the texture itself is (#578).
+    /// Without the cast on the host, the view keeps the texture's format, as
+    /// before. Samples one texel on the GPU, in every format there is an
+    /// sRGB of: material maps are mostly BC7 and BC1.
+    #[test]
+    fn views_keep_their_srgb_conversion() {
+        let Some(gpu) = host() else {
+            return; // no host GPU
+        };
+        let casting = gpu.typed_format_casting();
+        // A BC1 colour block of one colour, 16/31 in red.
+        let bc1 = vec![0x10, 0x84, 0x10, 0x84, 0, 0, 0, 0];
+        // The same behind an alpha block.
+        let bc2 = [vec![0xff; 8], bc1.clone()].concat();
+        // Mode 6 (bit 6 set): endpoints of 7 bits, 64 each, p bits 0, every
+        // index 0: 128/255 in all channels.
+        let mut bits = 0x40u128;
+        for endpoint in 0..8 {
+            bits |= 64 << (7 + 7 * endpoint);
+        }
+        let bc7 = bits.to_le_bytes().to_vec();
+        let plain = vec![0x80; 4];
+        for (srgb, linear, block, stored) in [
+            (29, 28, &plain, 128.0 / 255.0),
+            (91, 87, &plain, 128.0 / 255.0),
+            (93, 88, &plain, 128.0 / 255.0),
+            (72, 71, &bc1, 16.0 / 31.0),
+            (75, 74, &bc2, 16.0 / 31.0),
+            (78, 77, &bc2, 16.0 / 31.0),
+            (99, 98, &bc7, 128.0 / 255.0),
+        ] {
+            let stored: f32 = stored;
+            let converted = ((stored + 0.055) / 1.055).powf(2.4);
+            for (texture, view) in [(linear, linear), (linear, srgb), (srgb, linear), (srgb, srgb)] {
+                let read_as = if casting { view } else { texture };
+                let expected = if read_as == srgb { converted } else { stored };
+                let red = sample_one_texel(&gpu.device, DXGI_FORMAT(texture), DXGI_FORMAT(view), block)
+                    .expect("the sample ran");
+                assert!(
+                    (red - expected).abs() < 0.006,
+                    "texture {texture} viewed as {view}: red {red}, expected {expected}"
+                );
+            }
+        }
+        assert_eq!(super::device_removed(), None);
+        // Formats that differ in more keep the texture's.
+        assert!(!gamma_pair(28, 30) && !gamma_pair(98, 71) && !gamma_pair(98, 98));
+    }
+
+    /// Fills the one texel (or block of 4x4) of a texture in
+    /// `texture_format` with `block`, makes a shader view of it in
+    /// `view_format` the way the title's views are made ([`fits`]), and
+    /// returns the red channel a compute shader reads through that view.
+    fn sample_one_texel(
+        device: &ID3D12Device,
+        texture_format: DXGI_FORMAT,
+        view_format: DXGI_FORMAT,
+        block: &[u8],
+    ) -> windows::core::Result<f32> {
+        const SHADER: &str = "#define RS \"DescriptorTable(SRV(t0)), UAV(u0)\"\n\
+            Texture2D<float4> texel : register(t0);\n\
+            RWByteAddressBuffer result : register(u0);\n\
+            [RootSignature(RS)]\n\
+            [numthreads(1, 1, 1)]\n\
+            void main() { result.Store(0, asuint(texel.Load(int3(0, 0, 0)).r)); }\n";
+        // One texel, or the one block of a compressed texture.
+        let side = if block.len() > 4 { 4 } else { 1 };
+        // Rows of a texture copy are 256 bytes apart.
+        const ROW_PITCH: u64 = 256;
+        let mut rig = crate::inplace::Rig::new(device)?;
+        let default_heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+        let texture_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: u64::from(side),
+            Height: side,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: texture_format,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            ..Default::default()
+        };
+        let result_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: 4,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut texture: Option<ID3D12Resource> = None;
+        let mut result: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of resources of our own.
+        unsafe {
+            device.CreateCommittedResource(
+                &default_heap,
+                D3D12_HEAP_FLAG_NONE,
+                &texture_desc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                None,
+                &mut texture,
+            )?;
+            device.CreateCommittedResource(
+                &default_heap,
+                D3D12_HEAP_FLAG_NONE,
+                &result_desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut result,
+            )?;
+        }
+        let texture = texture.ok_or_else(windows::core::Error::empty)?;
+        let result = result.ok_or_else(windows::core::Error::empty)?;
+
+        // The texel's bytes, uploaded through a buffer.
+        let upload = rig.committed(D3D12_HEAP_TYPE_UPLOAD, ROW_PITCH, D3D12_RESOURCE_STATE_GENERIC_READ)?;
+        let mut mapped = std::ptr::null_mut();
+        // SAFETY: the mapping holds the buffer's bytes until unmapped.
+        unsafe {
+            upload.Map(0, None, Some(&mut mapped))?;
+            mapped.cast::<u8>().copy_from_nonoverlapping(block.as_ptr(), block.len());
+            upload.Unmap(0, None);
+        }
+
+        // The view, made as the title's are: `fits` picks its format.
+        let mut view_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: view_format,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() },
+            },
+        };
+        assert!(fits(&texture, Some(&mut view_desc.Format), false), "the host allows the view");
+        // SAFETY: plain creation; the view names a live texture.
+        let view_heap: ID3D12DescriptorHeap = unsafe {
+            let heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                NumDescriptors: 1,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                NodeMask: 0,
+            })?;
+            device.CreateShaderResourceView(&texture, Some(&view_desc), heap.GetCPUDescriptorHandleForHeapStart());
+            heap
+        };
+
+        let code = crate::host::compile(SHADER, windows::core::s!("main"), windows::core::s!("cs_5_1"))?;
+        // SAFETY: the compiled bytes carry the root signature too.
+        let (root, pipeline): (ID3D12RootSignature, ID3D12PipelineState) = unsafe {
+            let root: ID3D12RootSignature = device.CreateRootSignature(0, &code)?;
+            let pipeline = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            })?;
+            (root, pipeline)
+        };
+
+        // Upload the texel, then let the shader read it.
+        // SAFETY: an open list of ours; every resource named is alive.
+        rig.run(|list| unsafe {
+            let destination = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(&texture),
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let source = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(&upload),
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: 0,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: texture_format,
+                            Width: side,
+                            Height: side,
+                            Depth: 1,
+                            RowPitch: ROW_PITCH as u32,
+                        },
+                    },
+                },
+            };
+            list.CopyTextureRegion(&destination, 0, 0, 0, &source, None);
+            list.ResourceBarrier(&[crate::host::transition(
+                &texture,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            )]);
+            list.SetDescriptorHeaps(&[Some(view_heap.clone())]);
+            list.SetComputeRootSignature(&root);
+            list.SetPipelineState(&pipeline);
+            list.SetComputeRootDescriptorTable(0, view_heap.GetGPUDescriptorHandleForHeapStart());
+            list.SetComputeRootUnorderedAccessView(1, result.GetGPUVirtualAddress());
+            list.Dispatch(1, 1, 1);
+        })?;
+        let bytes = rig.fetch(&result, 0, 4)?;
+        Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
     /// Memory the runtime maps, unmaps or writes names the textures that
     /// are there: among packed neighbours the one whose held levels the
     /// range lies in (it ends where the next one starts), and the ones
@@ -3620,6 +3859,44 @@ mod tests {
         for (start, end) in original {
             assert!(compacted.iter().any(|&(a, b)| a <= start && b >= end));
         }
+    }
+
+    #[test]
+    fn an_old_unmapped_observation_preserves_a_replacement_view() {
+        let Some(heap) = HostHeap::new(false, 8) else { return };
+        let slot = 1;
+        heap.queue_texture(slot, true, false, 10);
+        let (_, observed) = heap.texture_slots_due(10, 1).0[0];
+
+        // The replacement is a 64 x 64 BC7 texture with synthetic backing.
+        static BYTES: [u8; 65536] = [0; 65536];
+        let address = BYTES.as_ptr() as u64;
+        let resource = [3, 0, 0, 0, 64, 0, 64, 0x1_0001, 98, 1, 0, 0x105, 0, 0];
+        let mut srv = [0; 16];
+        srv[..6].copy_from_slice(&[98, 4, 5768, 0, 0, 1]);
+        (srv[10], srv[11]) = (address as u32, (address >> 32) as u32);
+        let view = View::Placed(false, resource, srv);
+        let [entry, generation] = super::super::words_for(view.clone());
+        let title = [super::super::VIEW_TAG, entry, generation];
+        let handle = title.as_ptr() as u64;
+        assert_eq!(heap.mirror(slot, handle, false), Some(view.clone()));
+        let (_, replacement) = heap.texture_slots_due(u64::MAX, 1).0[0];
+        assert_ne!(observed, replacement);
+        assert_eq!(heap.mirror(slot, handle, true), Some(view));
+        assert_eq!(super::device_removed(), None);
+        let key = u64::from(generation) << 32 | u64::from(entry);
+        assert!(heap.kept.lock().unwrap()[slot as usize].is_some());
+        assert!(!heap.texture_slot_gone(slot, observed));
+        assert_eq!(heap.made.lock().unwrap()[slot as usize], key);
+        assert_eq!(heap.texture_slots_due(u64::MAX, 1).0, [(slot, replacement)]);
+        // A completed write is no longer queued for refresh.
+        heap.texture_slot_done(slot, replacement, None);
+        assert!(!heap.texture_slot_gone(slot, replacement));
+        assert_eq!(heap.made.lock().unwrap()[slot as usize], key);
+        heap.queue_texture(slot, true, false, 12);
+        let (_, current) = heap.texture_slots_due(u64::MAX, 1).0[0];
+        assert!(heap.texture_slot_gone(slot, current));
+        assert_eq!(heap.made.lock().unwrap()[slot as usize], 0);
     }
 
     /// Memory the runtime maps under a slot's texture makes the slot due

@@ -181,8 +181,12 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
     let began = std::time::Instant::now();
     let done = Mutex::new(HashSet::new());
     let counts = [const { AtomicUsize::new(0) }; 5];
-    for root in &paths {
+    'scanning: for root in &paths {
         for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            if limit.is_some_and(|n| began.elapsed().as_secs() >= n) {
+                counts[3].fetch_add(1, Ordering::Relaxed);
+                break 'scanning;
+            }
             if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
                 continue;
             }

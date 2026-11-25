@@ -48,6 +48,10 @@ pub fn run(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                     continue;
                 }
             };
+            let file_bytes = entry.metadata()?.len();
+            println!("Reading {} ({} MiB)", path.display(), file_bytes / (1 << 20));
+            let mut read_bytes = 0u64;
+            let mut next_report = 1u64 << 30;
             let mut data = Vec::new();
             let mut found_in_file = false;
             loop {
@@ -66,6 +70,11 @@ pub fn run(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                     }
                 }
                 data.truncate(previous + added);
+                read_bytes += added as u64;
+                if read_bytes >= next_report {
+                    println!("Read {} of {} MiB", read_bytes / (1 << 20), file_bytes / (1 << 20));
+                    next_report = read_bytes.saturating_add(1 << 30);
+                }
                 if added == 0 {
                     break;
                 }

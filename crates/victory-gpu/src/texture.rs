@@ -2129,6 +2129,18 @@ mod pool_tests {
         all(&first).fill(0xA5);
         let at = first.data;
         drop(first);
+        // Another test's submission may be running: the buffer comes back
+        // when it has finished, which the next submission's end notices.
+        for _ in 0..500 {
+            let back = SPARE.lock().unwrap().kept.get(&class(bytes)).is_some_and(|kept| !kept.is_empty());
+            if back {
+                break;
+            }
+            let list = host.new_list().unwrap();
+            list.close();
+            host.execute(&[&list]);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let (second, used) = make();
         assert!(used && second.data == at, "the same buffer");
         assert_eq!(all(&second)[0], 0xA5);

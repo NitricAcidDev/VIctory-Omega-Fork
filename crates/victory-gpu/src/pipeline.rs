@@ -126,6 +126,8 @@ pub(crate) struct Translated {
     /// Whether the shader's code can store to buffer memory ([`stores`]);
     /// true when its code is not known.
     pub(crate) stores: bool,
+    /// Threads of a compute group (zeros for other stages).
+    pub(crate) threads: [u32; 3],
 }
 
 #[cfg(windows)]
@@ -189,17 +191,18 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     };
     let host = crate::shader_cache::host_shader(container)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
-    let used = programs
-        .into_iter()
-        .find(|p| {
-            matches!(
-                p.stage,
-                HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs
-            )
-        })
-        .map(|p| p.used)
-        .unwrap_or_default();
-    Ok(Translated { host, used, stores })
+    let main = programs.into_iter().find(|p| {
+        matches!(
+            p.stage,
+            HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs
+        )
+    });
+    let threads = match main.as_ref().map(|p| &p.io) {
+        Some(victory_shader::native::StageIo::Cs(cs)) => cs.threads,
+        _ => [0; 3],
+    };
+    let used = main.map(|p| p.used).unwrap_or_default();
+    Ok(Translated { host, used, stores, threads })
 }
 
 /// The compute pipelines of the console's ray-tracing structure builder
@@ -845,6 +848,66 @@ mod tests {
                 (g.targets.NumRenderTargets, g.targets.RTFormats[0].0),
                 (1, 28)
             );
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod cached_tests {
+    use super::*;
+
+    /// Every compute translation of a local shader cache
+    /// (`VICTORY_TEST_SHADER_CACHE=<cache>/shaders`) makes a host pipeline;
+    /// those the host refuses are listed. A cache holds title-derived code:
+    /// it stays local.
+    #[test]
+    #[ignore = "needs VICTORY_TEST_SHADER_CACHE: a local shader cache"]
+    fn cached_compute_translations_make_host_pipelines() {
+        let dir = std::env::var_os("VICTORY_TEST_SHADER_CACHE").expect("VICTORY_TEST_SHADER_CACHE");
+        if crate::host::host().is_none() {
+            return;
+        }
+        let mut files = Vec::new();
+        let mut dirs = vec![std::path::PathBuf::from(dir)];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() { dirs.push(path) } else { files.push(path) }
+            }
+        }
+        files.sort();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let refused = Mutex::new(Vec::new());
+        let made = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                std::thread::Builder::new()
+                    .stack_size(16 << 20)
+                    .spawn_scoped(scope, || {
+                        while let Some(path) = files.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                            let Some(host) = crate::shader_cache::decode(&std::fs::read(path).unwrap()) else { continue };
+                            if host.stage != victory_shader::HwStage::Cs {
+                                continue;
+                            }
+                            let shader = Arc::new(Shader {
+                                stage: "compute",
+                                hash: path.file_name().unwrap().to_string_lossy()[..16].to_owned(),
+                                container: Vec::new(),
+                                translated: OnceLock::from(Some(Translated { host, used: Vec::new(), stores: true, threads: [0; 3] })),
+                            });
+                            match host::HostPipeline::new(std::slice::from_ref(&shader), None) {
+                                Some(_) => _ = made.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                None => refused.lock().unwrap().push(path.clone()),
+                            }
+                        }
+                    })
+                    .unwrap();
+            }
+        });
+        let refused = refused.into_inner().unwrap();
+        eprintln!("{} made, {} refused", made.into_inner(), refused.len());
+        for path in &refused {
+            eprintln!("refused {}", path.display());
         }
     }
 }

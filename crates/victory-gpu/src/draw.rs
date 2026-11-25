@@ -1914,7 +1914,10 @@ impl State {
             // before.
             if !room {
                 let has_its_texture = reupload_when_full()
-                    && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
+                    && heap.handle(index).is_some_and(|handle| {
+                        host.texture_slot_made_from(index, handle)
+                            || view_has_live_host_texture(crate::descriptor::view(handle))
+                    });
                 if !has_its_texture {
                     refused += 1;
                     if full_card_pass() {
@@ -2057,6 +2060,26 @@ impl State {
             }
             text
         });
+    }
+
+    /// Runs a dispatch of the console's `DispatchX` on the host.
+    ///
+    /// With bit 5 of `flags` (`USE_THREAD_DIMENSIONS` of the console GPU's
+    /// `COMPUTE_DISPATCH_INITIATOR`) the counts are threads, not groups:
+    /// taken for groups they ran as many times too many as a group has
+    /// threads (pull request #646 of fxceless/victory-gta6).
+    /// shortcut: the console leaves the threads past the counts out of the
+    /// last groups; here those groups run whole.
+    pub(crate) fn dispatch_x(&mut self, list: &HostList, x: u32, y: u32, z: u32, flags: u32) {
+        let [x, y, z] = if flags & 0x20 == 0 {
+            [x, y, z]
+        } else {
+            let group = crate::pipeline::host_pipeline(self.pipeline as This)
+                .filter(|p| p.compute)
+                .map_or([1; 3], |p| p.stages[0].translated().threads);
+            thread_groups([x, y, z], group)
+        };
+        self.dispatch(list, x, y, z);
     }
 
     /// Runs a dispatch on the host.
@@ -2640,6 +2663,18 @@ impl State {
                 let index = first + k;
                 let used = entries.iter().find(|u| u.table_offset_dwords / 8 == k);
                 match crate::descriptor::view(table + u64::from(k) * 32) {
+                    Some(View::Constant(address, size))
+                        if crate::host::fill_on_card()
+                            && crate::host::late()
+                            && crate::host::flights_write(address as usize, address as usize + size as usize)
+                            && let Some(shadow) = crate::shadow::find(address, u64::from(size))
+                            && let Some(gpu) = {
+                                shadow.refresh(list, address, u64::from(size));
+                                list.card_constants(&shadow, address, u64::from(size))
+                            } =>
+                    {
+                        host.constant_at(index, gpu, size);
+                    }
                     Some(View::Constant(address, size)) => {
                         has_cbv = true;
                         let Some((gpu, to)) = list.scratch(u64::from(size)) else {
@@ -3006,6 +3041,7 @@ impl State {
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
             .map(|w| (w.scratch.clone(), offset - w.base));
+        let hit_window = hit.is_some();
         let (bounded, at) = match hit {
             Some(hit) => hit,
             None => {
@@ -3071,7 +3107,11 @@ impl State {
             _ => false,
         };
         if !ran {
-            crate::indirect::done(list, &bounded);
+            // (A window's buffer is back in the common state since the draw
+            // before this one; only a clamp just recorded left it otherwise.)
+            if !hit_window {
+                crate::indirect::done(list, &bounded);
+            }
             why("prepare failed");
             return false;
         }
@@ -3410,6 +3450,31 @@ const LINE_LOOP: u32 = 18;
 const QUADS: u32 = 19;
 const QUAD_STRIP: u32 = 20;
 
+/// Whether `view` already resolves to a live on-card host copy (`copy_state == 2`),
+/// so updating its descriptor slot or re-uploading into it allocates zero new
+/// VRAM even when the title rewrote the descriptor (e.g., sharper mip-streaming
+/// view or another slot sharing the same placed texture).
+fn view_has_live_host_texture(view: Option<View>) -> bool {
+    match view {
+        Some(View::Placed(false, resource, desc)) if resource[0] != 1 => {
+            let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
+            crate::resource::placed_known(address, &resource)
+                .and_then(crate::resource::copy_state)
+                .is_some_and(|(state, _, _)| state == 2)
+        }
+        Some(View::Shader(object, _)) if crate::resource::title_fills(object as This) => {
+            crate::resource::copy_state(object as This)
+                .is_some_and(|(state, _, _)| state == 2)
+        }
+        _ => false,
+    }
+}
+
+/// The groups of `group` threads that hold `threads`, by axis.
+fn thread_groups(threads: [u32; 3], group: [u32; 3]) -> [u32; 3] {
+    std::array::from_fn(|i| threads[i].div_ceil(group[i].max(1)))
+}
+
 /// Fixed-function state, straight onto the host list.
 pub(crate) fn viewports(list: &HostList, viewports: &[D3D12_VIEWPORT]) {
     // SAFETY: an open list.
@@ -3485,5 +3550,70 @@ mod replay_tests {
 
         state.dynamic.clear();
         list.close();
+    }
+}
+
+#[cfg(test)]
+mod full_card_tests {
+    use super::view_has_live_host_texture;
+    use crate::descriptor::View;
+
+    /// A mip-streaming view rewrite (different `MostDetailedMip`, new
+    /// descriptor record, even differing filler stack words `[1]`/`[13]`) of
+    /// a placed texture whose host copy is already alive on the card must be
+    /// recognized as zero-VRAM-cost by `view_has_live_host_texture`.
+    #[test]
+    fn mip_stream_view_rewrite_recognizes_existing_live_host_texture() {
+        let Some(_host) = crate::host::host() else {
+            return;
+        };
+        let mut backing = vec![0u8; 65536];
+        let address = backing.as_mut_ptr() as u64;
+        // 64x64 R8G8B8A8_UNORM (format 28), 4 mips, SW_4KB_S (0x105).
+        let mut resource = [3u32, 0x1111_2222, 0, 0, 64, 0, 64, 4 << 16 | 1, 28, 1, 0, 0x105, 0, 0x3333_4444];
+        let view_with = |res: [u32; 14], first_mip: u32| {
+            let mut desc = [0u32; 16];
+            desc[0] = 28;
+            desc[1] = 4; // TEXTURE2D
+            desc[4] = first_mip;
+            desc[5] = 4 - first_mip;
+            desc[10] = address as u32;
+            desc[11] = (address >> 32) as u32;
+            View::Placed(false, res, desc)
+        };
+        // Before any host copy exists: must be false.
+        assert!(!view_has_live_host_texture(Some(view_with(resource, 2))));
+
+        // Materialize the placed texture and its on-card host copy.
+        let tex = crate::resource::texture_at(address, &resource).expect("placed texture");
+        let _host_copy = crate::resource::host_copy(tex).expect("host copy created");
+
+        // Now a rewritten sharper-mip view with different filler words `[1]`/`[13]`
+        // must still resolve to the live on-card host texture.
+        resource[1] = 0x5555_6666;
+        resource[13] = 0x7777_8888;
+        assert!(view_has_live_host_texture(Some(view_with(resource, 0))));
+
+        // A buffer view or unknown address remains false.
+        assert!(!view_has_live_host_texture(None));
+        let mut other_desc = [0u32; 16];
+        other_desc[10] = 0x1000;
+        assert!(!view_has_live_host_texture(Some(View::Placed(false, resource, other_desc))));
+    }
+}
+
+#[cfg(test)]
+mod thread_dimension_tests {
+    use super::thread_groups;
+
+    #[test]
+    fn thread_counts_become_the_groups_that_hold_them() {
+        assert_eq!(thread_groups([48, 1, 1], [64, 1, 1]), [1, 1, 1]);
+        assert_eq!(thread_groups([65, 1, 1], [64, 1, 1]), [2, 1, 1]);
+        assert_eq!(thread_groups([1920, 1080, 1], [8, 8, 1]), [240, 135, 1]);
+        assert_eq!(thread_groups([10, 16, 5], [8, 8, 4]), [2, 2, 2]);
+        assert_eq!(thread_groups([0, 1, 1], [64, 1, 1]), [0, 1, 1]);
+        // A program whose group is not known: as they are.
+        assert_eq!(thread_groups([7, 2, 3], [0, 0, 0]), [7, 2, 3]);
     }
 }

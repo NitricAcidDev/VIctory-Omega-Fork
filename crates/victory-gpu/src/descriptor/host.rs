@@ -3047,7 +3047,14 @@ fn keep_views() -> bool {
 fn same_placed_texture(a: &View, b: &View) -> bool {
     match (a, b) {
         (View::Placed(false, resource, desc), View::Placed(false, other, other_desc)) => {
-            resource[0] != 1 && resource == other && desc[10..12] == other_desc[10..12]
+            // Words 1 and 13 are filler the title leaves as its stack had
+            // them (`resource::texture_at` leaves them out too).
+            let told = |r: &[u32; 14]| {
+                let mut r = *r;
+                (r[1], r[13]) = (0, 0);
+                r
+            };
+            resource[0] != 1 && told(resource) == told(other) && desc[10..12] == other_desc[10..12]
         }
         _ => false,
     }
@@ -3296,6 +3303,13 @@ mod tests {
         let low = view(texture, 3, 0x1000_0000);
         // more mips of the same texture
         assert!(same_placed_texture(&low, &view(texture, 0, 0x1000_0000)));
+        // other filler in words 1 and 13
+        let filler = |a: u32, b: u32| {
+            let mut t = texture;
+            (t[1], t[13]) = (a, b);
+            view(t, 0, 0x1000_0000)
+        };
+        assert!(same_placed_texture(&filler(0x1111_2222, 0x3333_4444), &filler(0x5555_6666, 0x7777_8888)));
         // another address, another description, a buffer, an unordered view
         assert!(!same_placed_texture(&low, &view(texture, 3, 0x2000_0000)));
         let mut wider = texture;

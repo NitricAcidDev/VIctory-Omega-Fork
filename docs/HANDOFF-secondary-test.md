@@ -114,7 +114,7 @@ Lines to look for in a log:
 
 ## Ray tracing
 
-A build of its own (branch `ray-tracing-test`, local; not on `primary`):
+A build of its own (branch `ray-tracing-test`, not on `primary`):
 fxceless #994 with #854 and #993 merged into this tree, so that the title's
 own structure builder runs. Its tests pass here; not run with the title. How
 to build, start and read it: [AGENT.md](AGENT.md), section 6. Others measured

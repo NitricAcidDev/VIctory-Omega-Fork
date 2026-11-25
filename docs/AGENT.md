@@ -133,7 +133,7 @@ git diff -U0 OLD NEW -- crates | grep '^-[^-]'
 ## 6. The ray tracing build
 
 Done as a build of its own, not on `primary`: branch `ray-tracing-test`
-(local, `ff82795`, on top of `primary` `4d52524`), worktree
+(on GitHub; the merge is `ff82795`, on top of `primary` `4d52524`), worktree
 `runtime\build\victory-rt-test`, exe `target-rt\diag\victory.exe`. It is
 fxceless #994 (`fx/pr-994`, stacked on #854 and #993) merged into this tree;
 what was kept of each side is in the commit's message. Tests on the RTX 5080:

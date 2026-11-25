@@ -15,8 +15,9 @@
 //! run empty, saturating without 32-bit wraparound so a list of thousands of
 //! garbage records cannot run for seconds either.
 //!
-//! shortcut: the bounds (2^24 vertices, 2^26 vertex instances, 65,535
-//! groups per dimension and 2^20 per dispatch, one-dimensional mesh
+//! shortcut: the bounds (2^24 vertices, 2^26 vertex instances, 131,070
+//! groups of a compute record along x in two dispatches, else 65,535
+//! per dimension, and 2^20 per dispatch, one-dimensional mesh
 //! dispatches, the budget) cut legitimate work beyond them; raise them if
 //! the title needs more.
 
@@ -34,9 +35,7 @@ cbuffer Record : register(b0) {
     uint stride;
     uint records;
     uint args_offset;
-    // Bit 0: a count buffer bounds the records. Bit 1: the records are a
-    // window clamped ahead of their draws: one that asks for more than can
-    // run is left empty and costs nothing.
+    // Bit 0: a count buffer bounds the records.
     uint has_count;
     uint count_offset;
 };
@@ -49,11 +48,12 @@ RWByteAddressBuffer budget : register(u1);
 static const uint BUDGET = 1u << 27;
 // Groups of one dispatch; more run empty.
 static const uint GROUPS = 1u << 20;
+// Groups of one dispatch along x, what a host runs at most.
+static const uint MOST = 65535u;
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     uint eff_count = records;
-    bool ahead = (has_count & 2u) != 0;
     if ((has_count & 1u) != 0) {
         eff_count = min(eff_count, count_buf.Load(count_offset));
     }
@@ -63,13 +63,16 @@ void main(uint3 id : SV_DispatchThreadID) {
     uint cost;
     uint2 draw_counts = uint2(0, 0);
     uint3 groups = uint3(0, 0, 0);
+    // What a compute record asks for past one dispatch, behind the records.
+    uint3 rest = uint3(0, 0, 0);
     if (kind <= 1) {
-        // Draws: vertex or index count, then instances.
+        // Draws: vertex or index count, then instances. More than 2^24 of
+        // either is a record nothing wrote: empty, and free.
         uint2 asked = src_args.Load2(src_at);
-        if (ahead && (asked.x > (1u << 24) || asked.y > (1u << 24))) {
+        if (asked.x > (1u << 24) || asked.y > (1u << 24)) {
             asked = uint2(0, 0);
         }
-        uint count = min(asked.x, 1u << 24);
+        uint count = asked.x;
         uint instances = min(asked.y, (1u << 26) / max(count, 1u));
         cost = count * instances;
         draw_counts = uint2(count, instances);
@@ -77,38 +80,38 @@ void main(uint3 id : SV_DispatchThreadID) {
         uint3 asked = src_args.Load3(src_at);
         // Diagnostics, in the budget buffer's words after the mesh ones:
         // the largest x a compute record asked for, and the records that
-        // asked for more groups in x than one dispatch runs (they are cut
-        // to 65,535 below, so the groups past it never run). Not the
+        // asked for more groups in x than one dispatch runs. Not the
         // garbage of a slot nothing wrote.
         if (asked.x <= (1u << 24) && asked.y <= 64u && asked.z <= 64u) {
             uint noted;
             budget.InterlockedMax(12, asked.x, noted);
-            if (asked.x > 65535u) {
+            if (asked.x > MOST) {
                 budget.InterlockedAdd(16, 1u, noted);
             }
         }
-        uint3 g = min(asked, uint3(65535u, 65535u, 65535u));
+        uint3 g = min(asked, uint3(MOST, MOST, MOST));
         // x * y fits 32 bits; the whole count may not.
         if (g.z != 0 && g.x * g.y > GROUPS / g.z) {
             g = uint3(0, 0, 0);
+        } else if (asked.x > MOST && asked.x <= 2u * MOST && g.y * g.z <= GROUPS / asked.x) {
+            rest = uint3(asked.x - MOST, g.y, g.z);
         }
-        cost = g.x * g.y * g.z * 64u;
+        cost = (g.x + rest.x) * g.y * g.z * 64u;
         groups = g;
     } else {
-        // Mesh dispatches: the console's are one-dimensional.
+        // Mesh dispatches: the console's are one-dimensional. Over the most
+        // a dispatch runs, a record is a slot the title has not filled (it
+        // leaves all ones there): empty, and not counted below either.
         uint3 g = src_args.Load3(src_at);
-        // Ahead of its draw, a record over the most a dispatch runs is a
-        // slot the title has not filled (the title leaves all
-        // ones there): empty, and not counted below either.
-        if (ahead && g.x > 65535u) {
+        if (g.x > MOST) {
             g = uint3(0, 0, 0);
         }
         // Diagnostics, in the budget buffer's next words: the largest
         // group count a mesh record asked for, and the groups asked in all.
         uint was;
         budget.InterlockedMax(4, g.x, was);
-        budget.InterlockedAdd(8, min(g.x, 1u << 24), was);
-        g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
+        budget.InterlockedAdd(8, g.x, was);
+        g = uint3(g.x, min(g.y, 1u), min(g.z, 1u));
         cost = g.x * g.y * g.z * 128u;
         groups = g;
     }
@@ -137,8 +140,15 @@ void main(uint3 id : SV_DispatchThreadID) {
     } else {
         if (over) {
             groups = uint3(0, 0, 0);
+            rest = uint3(0, 0, 0);
         }
         dst_args.Store3(dst_at, groups);
+        if (kind == 2) {
+            dst_args.Store3(records * stride + dst_at, rest);
+        }
+        if (kind == 2) {
+            dst_args.Store3(records * stride + dst_at, rest);
+        }
         for (uint off = 12; off < stride; off += 4) {
             dst_args.Store(dst_at + off, src_args.Load(src_at + off));
         }
@@ -257,6 +267,19 @@ fn validate_layout(
 /// buffer, leaving that scratch buffer in `INDIRECT_ARGUMENT` at offset `0`.
 /// Replaces the list's compute root signature and pipeline (callers bind
 /// theirs after). `None` if the clamp or alignment is not available.
+///
+/// A record that asks for more than can run (2^24 vertices or instances,
+/// 65,535 groups of a mesh dispatch) is one nothing wrote: the title leaves
+/// all ones in them. It is left empty and charges nothing. Clamped to the
+/// most that runs, sixteen of them used up a list's budget, and every draw
+/// of the list after them ran empty (run 93: 43 to 153 such records a
+/// frame).
+///
+/// Compute records ask for more groups along x than a host dispatch runs
+/// (the title's programs that run a group for each tile of a kind, 90,000
+/// tiles of 8x8 at 3200x1800): those past 65,535 are in records of their
+/// own behind the others ([`rest_offset`]), for a second dispatch whose
+/// groups are numbered on from there.
 pub(crate) fn bound(
     list: &HostList,
     src: (&ID3D12Resource, u64),
@@ -264,46 +287,25 @@ pub(crate) fn bound(
     spec: (u32, u32, u32),
 ) -> Option<ID3D12Resource> {
     let bytes = validate_layout(spec, src.1, count.map(|(_, off)| off))?;
+    let bytes = if spec.0 == DISPATCH { bytes.checked_mul(2).filter(|&b| b <= u64::from(u32::MAX))? } else { bytes };
     let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
     record_clamp(c, &list.list, &dst, budget, src, count, spec).then_some(dst)
 }
 
-/// [`bound`] for a window of records clamped ahead of the draws that will
-/// read them (`crate::draw`'s windows; no count buffer). The records past
-/// the ones the title filled are whatever the buffer holds, and each
-/// record clamped charges the list's budget when it is clamped: a slot of
-/// all ones, clamped to the most a mesh dispatch runs (65,535 groups),
-/// charged a sixteenth of the budget, so sixteen of them emptied every
-/// draw of the list after them (run 93: "the largest group count asked for
-/// 4294967295", 43 to 153 such records a frame). Here a record that asks
-/// for more than can run is left empty and charges nothing; a record
-/// clamped alone is clamped and charged as before.
-pub(crate) fn bound_ahead(
-    list: &HostList,
-    src: (&ID3D12Resource, u64),
-    spec: (u32, u32, u32),
-) -> Option<ID3D12Resource> {
-    let bytes = validate_layout(spec, src.1, None)?;
-    let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
-    record_clamp_as(c, &list.list, &dst, budget, src, None, spec, true).then_some(dst)
+/// The argument kind of compute dispatches (PC numbering).
+const DISPATCH: u32 = 2;
+
+/// The groups along x one host dispatch runs at most.
+pub(crate) const MOST_GROUPS: u32 = 65_535;
+
+/// Where, in the buffer [`bound`] gave for `records` compute records `stride`
+/// bytes apart, the records of the groups past [`MOST_GROUPS`] begin.
+pub(crate) fn rest_offset(stride: u32, records: u32) -> u64 {
+    u64::from(stride) * u64::from(records)
 }
 
+/// [`bound`], on a list and buffers of any device (the tests' is WARP).
 fn record_clamp(
-    c: &Clamp,
-    l: &ID3D12GraphicsCommandList,
-    dst: &ID3D12Resource,
-    budget: u64,
-    src: (&ID3D12Resource, u64),
-    count: Option<(&ID3D12Resource, u64)>,
-    spec: (u32, u32, u32),
-) -> bool {
-    record_clamp_as(c, l, dst, budget, src, count, spec, false)
-}
-
-/// [`record_clamp`]; `ahead`: the records are a window clamped ahead of
-/// their draws ([`bound_ahead`]).
-#[allow(clippy::too_many_arguments)]
-fn record_clamp_as(
     c: &Clamp,
     l: &ID3D12GraphicsCommandList,
     dst: &ID3D12Resource,
@@ -311,7 +313,7 @@ fn record_clamp_as(
     (src, src_offset): (&ID3D12Resource, u64),
     count: Option<(&ID3D12Resource, u64)>,
     (kind, stride, records): (u32, u32, u32),
-    ahead: bool,
+
 ) -> bool {
     let Some(bytes) = validate_layout(
         (kind, stride, records),
@@ -356,7 +358,7 @@ fn record_clamp_as(
         }
         None => (src_gpu, 0u32, 0u32),
     };
-    let constants = [kind, stride, records, args_offset, has_count | (u32::from(ahead) << 1), count_offset];
+    let constants = [kind, stride, records, args_offset, has_count, count_offset];
     // SAFETY: an open list; our root signature and pipeline; live source,
     // count, scratch destination, and budget buffers. `src` and `count` stay
     // in `COMMON` / `GENERIC_READ` via implicit buffer promotion while `dst`
@@ -889,7 +891,8 @@ void main() {
         let (_budget_buf, budget_ptr, budget_gpu) = warp.shared_buffer(256);
         let (_hits_buf, hits_ptr, hits_gpu) = warp.shared_buffer(256);
         let (readback_buf, readback_ptr, _) = warp.shared_buffer((STRIDE * 8) as u64);
-        let dst_buf = warp.default_uav(u64::from(STRIDE) * u64::from(MAX));
+        // (With the records of what is past one dispatch behind the others.)
+        let dst_buf = warp.default_uav(2 * u64::from(STRIDE) * u64::from(MAX));
         let sig = warp.signature(KIND_DISPATCH, STRIDE);
 
         // Fill the entire source buffer with non-zero sentinel bytes, then
@@ -912,7 +915,7 @@ void main() {
             1,
             [5, 1, 1, 0x7777_8888, 0x9999_AAAA, 0xBBBB_CCCC],
         );
-        // Record 2 exceeds 65,535 in X -> clamped to (65535, 1, 1).
+        // Record 2 exceeds 65,535 in X -> (65535, 1, 1) and (34465, 1, 1) behind.
         write_record(
             &mut initial_src,
             2,
@@ -969,6 +972,14 @@ void main() {
                 Some(&count_buf),
                 COUNT_OFFSET_1 as u64,
             );
+            warp.list.ExecuteIndirect(
+                &sig,
+                MAX,
+                &dst_buf,
+                rest_offset(STRIDE, MAX),
+                Some(&count_buf),
+                COUNT_OFFSET_1 as u64,
+            );
         }
         done_on(&warp.list, &dst_buf);
 
@@ -1014,6 +1025,14 @@ void main() {
                 Some(&count_buf),
                 COUNT_OFFSET_2 as u64,
             );
+            warp.list.ExecuteIndirect(
+                &sig,
+                MAX,
+                &dst_buf,
+                rest_offset(STRIDE, MAX),
+                Some(&count_buf),
+                COUNT_OFFSET_2 as u64,
+            );
         }
         done_on(&warp.list, &dst_buf);
 
@@ -1033,9 +1052,9 @@ void main() {
             (hits, spent, after_src, after_count, words)
         };
 
-        // Call #1: (3*2*1) + (5*1*1) + (65535*1*1) = 65,546 groups.
+        // Call #1: (3*2*1) + (5*1*1) + (100000*1*1) = 100,011 groups.
         // Call #2: (3*2*1) + (5*1*1) = 11 groups.
-        let expected_groups = (6 + 5 + 65_535) + (6 + 5);
+        let expected_groups = (6 + 5 + 100_000) + (6 + 5);
         assert_eq!(
             hits, expected_groups,
             "valid indirect dispatches must all execute"
@@ -1076,12 +1095,12 @@ void main() {
     /// preserving `StartIndexLocation`, `BaseVertexLocation`,
     /// `StartInstanceLocation`, and custom stride padding, and leaving
     /// `src_args` untouched.
-    /// A window of mesh records clamped ahead: the filled ones come out as
+    /// Mesh records, some of which nothing wrote: the filled ones come out as
     /// they are and are charged, the slots of all ones come out empty and
-    /// charge nothing; clamped as single records the same slots are clamped
-    /// to the most and spend the budget.
+    /// charge nothing (clamped to the most, sixteen of them were all of a
+    /// list's budget).
     #[test]
-    fn warp_window_leaves_unfilled_slots_empty_and_uncharged() {
+    fn warp_unfilled_slots_are_empty_and_uncharged() {
         let Some(mut warp) = WarpHarness::new() else {
             return;
         };
@@ -1098,7 +1117,7 @@ void main() {
                 src[at..at + 4].copy_from_slice(&word.to_le_bytes());
             }
         }
-        for ahead in [true, false] {
+        {
             let (src_buf, src_ptr, _) = warp.shared_buffer(total as u64);
             let (_budget_buf, budget_ptr, budget_gpu) = warp.shared_buffer(256);
             let (readback_buf, readback_ptr, _) = warp.shared_buffer(total as u64);
@@ -1109,7 +1128,7 @@ void main() {
                 std::ptr::write_bytes(budget_ptr, 0, 256);
                 std::ptr::write_bytes(readback_ptr, 0, total);
             }
-            assert!(record_clamp_as(
+            assert!(record_clamp(
                 &warp.clamp,
                 &warp.list,
                 &dst_buf,
@@ -1117,7 +1136,6 @@ void main() {
                 (&src_buf, 0),
                 None,
                 (KIND_MESH, STRIDE, RECORDS),
-                ahead,
             ));
             done_on(&warp.list, &dst_buf);
             // SAFETY: an open list; the scratch buffer is copied for the check.
@@ -1145,21 +1163,15 @@ void main() {
             };
             for (i, groups) in filled.into_iter().enumerate() {
                 let rec = &out[i * 8..i * 8 + 4];
-                assert_eq!(rec, [groups, u32::from(groups > 0).max(1).min(1), 1, 0xAB00 + i as u32], "filled record {i}, ahead {ahead}");
+                assert_eq!(rec, [groups, u32::from(groups > 0).max(1).min(1), 1, 0xAB00 + i as u32], "filled record {i}");
             }
             let charged_filled = (5 + 519) * 128;
-            if ahead {
-                for i in filled.len()..RECORDS as usize {
-                    assert_eq!(out[i * 8..i * 8 + 3], [0, 0, 0], "unfilled slot {i} must come out empty");
-                    assert_eq!(out[i * 8 + 3], u32::MAX, "the words after the record are copied as they are");
-                }
-                assert_eq!(spent, charged_filled, "unfilled slots charge nothing");
-                assert_eq!(largest, 519, "and are not counted as asked for");
-            } else {
-                // Thirteen slots at 65,535 groups: sixteen would be all of it.
-                assert_eq!(spent, charged_filled + 13 * 65535 * 128, "clamped one by one, each slot is charged the most");
-                assert_eq!(largest, u32::MAX);
+            for i in filled.len()..RECORDS as usize {
+                assert_eq!(out[i * 8..i * 8 + 3], [0, 0, 0], "unfilled slot {i} must come out empty");
+                assert_eq!(out[i * 8 + 3], u32::MAX, "the words after the record are copied as they are");
             }
+            assert_eq!(spent, charged_filled, "unfilled slots charge nothing");
+            assert_eq!(largest, 519, "and are not counted as asked for");
         }
     }
 
@@ -1182,8 +1194,8 @@ void main() {
         let mut initial_src = vec![0u8; total_bytes];
         for i in 0..RECORDS as usize {
             let words: [u32; 6] = [
-                u32::MAX,                    // IndexCount -> clamps to 1 << 24
-                u32::MAX,                    // InstanceCount -> clamps to 4 (cost = 1 << 26)
+                1 << 24,                     // IndexCount: the most
+                1 << 24,                     // InstanceCount -> clamps to 4 (cost = 1 << 26)
                 1000 + i as u32,             // StartIndexLocation
                 (-200i32 + i as i32) as u32, // BaseVertexLocation
                 5000 + i as u32,             // StartInstanceLocation

@@ -2395,7 +2395,7 @@ impl<'a> Lower<'a> {
             // host's value can be.
             Input::FrontFace => (13, 0),
             Input::ThreadIdInGroup(c) => return self.thread_id(c),
-            Input::GroupId(c) => return self.compute_id("groupId.i32", 94, c),
+            Input::GroupId(c) => return self.group_id(c),
             Input::GroupInfo => return Val::Missing("the thread-group info SGPR"),
             Input::MeshGroup => {
                 let Val::I32(g) = self.compute_id("groupId.i32", 94, 0) else {
@@ -2458,6 +2458,23 @@ impl<'a> Lower<'a> {
             }
         };
         self.load_input(id, col)
+    }
+
+    /// A component of a compute group's number, read in the entry block:
+    /// along x, from where the host's dispatch begins
+    /// ([`super::shader::USER_GROUP_BASE`]).
+    fn group_id(&mut self, c: u8) -> Val {
+        let id = self.compute_id("groupId.i32", 94, c);
+        let Val::I32(g) = id else { return id };
+        // Root constants are few; a program that names many gets no more of
+        // them for a dispatch it may never see.
+        const MOST_USER_DATA: u32 = 40;
+        let named = self.x.native.layout.iter().map(|e| u32::from(e.user_data) + e.sgprs).max();
+        if c != 0 || self.x.native.stage != HwStage::Cs || named.unwrap_or(0) > MOST_USER_DATA {
+            return id;
+        }
+        let base = self.host_word(RootType::Other(super::shader::USER_GROUP_BASE), 0, 0);
+        Val::I32(self.s.m.bin(self.s.entry, Bin::Add, g, base))
     }
 
     /// A component of a compute thread or group id, read in the entry block.

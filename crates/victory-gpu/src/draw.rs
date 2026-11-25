@@ -216,7 +216,7 @@ const WINDOW_MOST: u64 = 64;
 /// hold garbage in this title (slots of all ones: run 93 spent lists'
 /// budgets on them and emptied the draws after), so in a window a record
 /// that asks for more than can run is left empty and charges nothing
-/// (`crate::indirect::bound_ahead`); a tail record that looks real is
+/// (`crate::indirect::bound`); a tail record that looks real is
 /// charged what it asks, a few thousand of 2^27. And arguments the title's CPU side changes are seen as
 /// before, at the next submission.
 fn windows() -> bool {
@@ -817,9 +817,13 @@ impl State {
         dword: u32,
         memory: Option<&crate::memory::Ready>,
     ) -> u32 {
-        use victory_shader::emit::{USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
+        use victory_shader::emit::{USER_GROUP_BASE, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
         if kind == USER_MEMORY_BASE {
             return memory.map_or(0, |m| m.base);
+        }
+        if kind == USER_GROUP_BASE {
+            // (Set between the dispatches of one that is cut in two.)
+            return 0;
         }
         if kind == USER_VIEW_BIAS {
             // The view begins on 16 bytes of the copy the address finds
@@ -2180,7 +2184,23 @@ impl State {
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
         // SAFETY: an open list with everything set.
-        unsafe { list.list.Dispatch(x, y, z) };
+        unsafe {
+            // More groups along x than one dispatch runs: several, numbered on
+            // ([`group_base`]; without it they would all be the first).
+            let base = (x > crate::indirect::MOST_GROUPS).then(|| group_base(p)).flatten();
+            let mut first = 0;
+            while let Some((param, dword)) = base
+                && x - first > crate::indirect::MOST_GROUPS
+            {
+                list.list.Dispatch(crate::indirect::MOST_GROUPS, y, z);
+                first += crate::indirect::MOST_GROUPS;
+                list.list.SetComputeRoot32BitConstant(param, first, dword);
+            }
+            list.list.Dispatch(x - first, y, z);
+            if let Some((param, dword)) = base {
+                list.list.SetComputeRoot32BitConstant(param, 0, dword);
+            }
+        }
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -3124,12 +3144,8 @@ impl State {
                 // buffer at offset 0.
                 let count_arg = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
                 // More than the record asked for: a window clamped ahead,
-                // whose unfilled slots must not spend the list's budget.
-                let bounded = if windowed && records > 1 {
-                    crate::indirect::bound_ahead(list, (&args.buffer, offset), (kind, step, records))
-                } else {
-                    crate::indirect::bound(list, (&args.buffer, offset), count_arg, (kind, step, records))
-                };
+                // whose unfilled slots spend nothing of the list's budget.
+                let bounded = crate::indirect::bound(list, (&args.buffer, offset), count_arg, (kind, step, records));
                 let Some(bounded) = bounded else {
                     self.window = None;
                     why("not bounded (no clamp, or arguments not 4-byte aligned)");
@@ -3183,6 +3199,25 @@ impl State {
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
+        // What compute records ask for past one dispatch
+        // (`crate::indirect::bound`), numbered on from there.
+        if kind == DISPATCH
+            && let Some((param, dword)) = group_base(p)
+        {
+            // SAFETY: as above.
+            unsafe {
+                list.list.SetComputeRoot32BitConstant(param, crate::indirect::MOST_GROUPS, dword);
+                list.list.ExecuteIndirect(
+                    &signature,
+                    max,
+                    &bounded,
+                    at + crate::indirect::rest_offset(stride, max),
+                    counter.as_ref().map(|(s, _)| &s.buffer),
+                    counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
+                );
+                list.list.SetComputeRoot32BitConstant(param, 0, dword);
+            }
+        }
         if kind == MESH {
             self.mesh_scissor(list, false);
         }
@@ -3194,6 +3229,17 @@ impl State {
         }
         true
     }
+}
+
+/// Where a compute pipeline takes the number of its dispatch's first group
+/// along x (`victory_shader::emit::USER_GROUP_BASE`): the root parameter and
+/// the dword in it; `None` for a program that does not ask for it.
+fn group_base(p: &HostPipeline) -> Option<(u32, u32)> {
+    let stage = p.stages.first().filter(|_| p.compute)?;
+    let (param, _) = stage.user_data?;
+    let asked = victory_shader::RootType::Other(victory_shader::emit::USER_GROUP_BASE);
+    let word = stage.translated().host.user_data.iter().find(|u| u.root == asked)?;
+    Some((param, word.index))
 }
 
 /// The host command signature for one argument of `kind` with records

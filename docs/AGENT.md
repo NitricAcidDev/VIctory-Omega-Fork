@@ -79,8 +79,8 @@ F="--locked --offline -j 14"
 "$CARGO" build --profile diag -p victory --features diagnostics,blake3/pure $F
 ```
 
-Last full run: GPU 252, shader 256, others 194 passed, policy 203 files ok
-(commit `d7dd13d`). A change in `victory-shader` (not in `*_tests.rs`) makes
+Last full run: GPU 255, shader 256, others 194 passed, policy 204 files ok
+(`primary` after `4237574`). A change in `victory-shader` (not in `*_tests.rs`) makes
 the first start translate every shader again.
 
 After any merge, look at what it **removes**, not only at conflicts: the last
@@ -92,18 +92,19 @@ git diff -U0 OLD NEW -- crates | grep '^-[^-]'
 
 ## 5. Do next, in this order
 
-1. **The test launcher that loads everything.** The switch is written:
-   `VICTORY_TEXTURE_SPILL=1` makes textures in the PC's memory (the card reads
-   them over the bus) once the card is full, `all` makes all of them there;
-   `VICTORY_TEXTURE_SPILL_PERCENT` (60) is how much of the shared memory they
-   may take. Code: `resource.rs` (`spill`, `shared_room`, `spills_now`,
-   `card_room`), `placed.rs` (`shared_heap`). Tested on the RTX 5080: texels
-   right, 0 MB of the card taken, 46.9 GB/s against 218.8 GB/s read. Why: the
-   player's log has the card at 13.0 of 13.8 GB with 15,000 textures waiting.
-   If it is not committed yet: run the tests, commit, push to `primary`, build
-   the exe, and make two launchers that set the switch and `call "%~dp0Launch
-   VIctory.bat" %*`: `(load everything)` with `1`, `(textures in PC memory)`
-   with `all`.
+1. **The launchers that load everything** are made; what they show is to be
+   read off the owner's run. `Launch VIctory (load everything).bat` sets
+   `VICTORY_TEXTURE_SPILL=1` (textures go to the PC's memory, which the card
+   reads over the bus, once the card is full), `(GPU shared memory, no
+   VRAM).bat` sets `all` (always there). `VICTORY_TEXTURE_SPILL_PERCENT` (60)
+   is how much of the shared memory they may take. Code: `resource.rs`
+   (`spill`, `shared_room`, `spills_now`, `card_room`), `placed.rs`
+   (`shared_heap`). On the RTX 5080: texels right, nothing of the card's
+   memory taken, 46.9 GB/s read against 218.8. Why: the player's log has the
+   card at 13.0 of 13.8 GB with 15,000 textures waiting. Log lines: `textures
+   are made in the PC's memory`, `textures made in the PC's memory since`. If
+   the picture is whole and the frame rate holds with `1`, make it the
+   launcher's default.
 2. **Read the next log** of the owner's run. Lines: `ambient light`,
    `ambient light follows the sky`, `reflections held` (the stand-in runs);
    `level by level`, `in use`, `waiting` (card memory); `heap buffers` in the

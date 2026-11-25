@@ -1549,6 +1549,20 @@ fn spill_refused(error: &windows::core::Error) {
     ONCE.call_once(|| tracing::warn!(%error, "a texture could not be made in the PC's memory; made on the card"));
 }
 
+#[cfg(all(test, windows))]
+mod spill_tests {
+    use super::{Spill, spill_of};
+
+    #[test]
+    fn textures_spill_only_when_asked() {
+        for off in [None, Some(""), Some("0"), Some("off")] {
+            assert_eq!(spill_of(off), Spill::Off);
+        }
+        assert_eq!(spill_of(Some(" 1 ")), Spill::Full);
+        assert_eq!(spill_of(Some("all")), Spill::All);
+    }
+}
+
 /// [`room`] of the card's own memory alone.
 #[cfg(windows)]
 fn card_room() -> bool {

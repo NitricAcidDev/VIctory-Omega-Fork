@@ -691,6 +691,7 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 | `VICTORY_PAGE_WRITES=guards` | what the storage layer writes under a texture already uploaded is not uploaded again (unset is `all`) |
 | `VICTORY_HEAP_RECHECK_MIPS=0` | a look at an uploaded texture reads three places of it, not every mip and block |
 | `VICTORY_FILL_ON_CARD=0` | constants a running submission writes are filled on the processor, after waiting for it |
+| `VICTORY_TEXTURE_SPILL=1`, `all` | textures are made in the PC's memory, which the card reads over the bus, once the card has no room (`all`: always); `VICTORY_TEXTURE_SPILL_PERCENT` (60) of what may be shared |
 | `VICTORY_AMBIENT=off` | the game's own indirect light, black while its rays do not run (a number: the level where the sky is not known yet) |
 | `VICTORY_AMBIENT_SKY=off`, `=gain,least,power` | the stand-in light is constant; its level is `gain * sky^power + least` (0.36,0.05,0.4) |
 | `VICTORY_AMBIENT_REFLECT=<part>` | the most a reflection holds, as a part of that light (0.5; 0: left alone); `VICTORY_AMBIENT_REFLECT_LEAST` the least (0) |

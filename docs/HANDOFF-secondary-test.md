@@ -1,68 +1,65 @@
 # Handoff: `secondary-test`
 
-25 November 2026. AI-assisted (Claude Code). For whoever continues here, a
-person or an agent. To merge into `primary`, read
+25 November 2026, evening. AI-assisted (Claude Code). For whoever continues
+here, a person or an agent. To merge into `main` or `primary`, read
 [secondary-test-merge-notes.md](secondary-test-merge-notes.md).
 
 ## Where it stands
 
-- The base is `primary` (`fb89116`) with the newest fxceless tree (`9376fd6`)
-  merged in. On top of it are fixes for what a player reported on this
-  branch: surfaces that are glossy and should not be, squares (mainly in
-  cutscenes), shadows, flickering meshes, missing textures and models,
-  others in each launch, and slow loading.
+- The base is `primary` (`e0be79c`) with the newest fxceless tree (`d510ee4`)
+  merged in. On top of it are fixes for what a player reported: surfaces that
+  are glossy and should not be, squares (mainly in cutscenes), shadows,
+  flickering meshes, missing textures and models that vary with each launch,
+  what is laid over the cutscenes, loading, and the frame rate.
 - **Nothing since `29124aa` has been run with the title on this machine.**
-  What is said below rests on unit tests, GPU tests on an RTX 5080 and
-  benchmarks. No cause below has been confirmed on a picture: they are the
-  faults found in the code that fit what was reported.
+  What is said below rests on unit tests, GPU tests on an RTX 5080,
+  benchmarks, and on what others measured in the title (said where).
 - The first start translates every shader again (the translator changed).
   Compare loading times from the second start on.
 
-Machine: Windows 11 x64, RTX 5080 (driver 617.42), 24 logical processors,
-64 GB.
+Machine: Windows 11 x64, RTX 5080 (driver 617.42, 32-lane waves), 24 logical
+processors, 64 GB.
 
 ## What was reported, and what was done
 
+"Here" in the last column: a test on this RTX 5080. "Title": seen by someone
+in the title, not by us.
+
 | Reported | Found | Done | Shown by |
 |----------|-------|------|----------|
-| Glossy where it should not be | A view that picks linear or sRGB of a texture made as the other read with the texture's curve: 0.5 of a roughness map read 0.21 | Such views keep their own, in RGBA8 (#644) and here in BC1, BC2, BC3, BC7, BGRA8, BGRX8 | Sampled on the GPU in seven formats, both ways; fails without |
-| Squares, mainly in cutscenes | Compute records of over 65,535 groups along x were cut: a program with a group for each screen tile leaves the tiles past it as they were | The rest runs as a second dispatch that counts on | 100,000 of 100,000 groups run |
-| Squares, missing textures, others in each launch | A texture is uploaded when its memory is mapped; the read into it may finish after. Nothing told of it, and later looks read 48 KiB | The end of a read makes its textures due again (one look for a run of writes); a look reads every mip and every 64 KiB block | A block that comes last is seen in all 64 places; before, more than half were missed |
-| The same | A texture over remapped memory was uploaded a list late; a slot found streamed out cleared a view written since; filler words of a description told one texture from itself | #606, #632, part of #676 | Their tests |
-| Flickering and missing meshes | Records nothing wrote (all ones) charged a list's budget, after which its indirect draws ran empty; mesh programs lost LDS barriers; arguments and constants from before were kept | Such records are empty and free; #714; #663; #742, #743 | Their tests |
-| Missing models | The host refuses a pipeline that blends an integer target | #501 | Its test; seen in this machine's log (one mesh pipeline) |
-| Shadows | One sampler used with and without a comparison was one host sampler; a comparison with a minimum or maximum became another kind | #756 | Its tests |
-| Loading | See below | | |
+| Squares | An indirect compute pass over classified tiles asks for 85,000 to 115,200 groups in x; 65,535 ran, the tiles past them kept an earlier shot | The rest runs as a second dispatch | Here: 100,000 of 100,000 groups run. Title: fxceless #834 (the same fix, found apart): blocks in 2 of 4 runs without, 0 of 3 with |
+| Squares, along the bottom | The tiling of the screen-space reflections has only a 64-lane form, which the driver refuses | Can be switched on: `Launch VIctory (squares test).bat` (#823; off by default: two passes it feeds darken the room) | Title: #823, 3 of 3 frames; issue #512 for the darkening |
+| Squares, glow that stays | One NaN or infinity stays in what the title blends into every frame | Pixel exports are guarded (#837) | Here |
+| Glossy | A view that picks linear or sRGB of a texture made as the other read with the texture's curve: 0.5 of a roughness map read 0.21 | Such views keep their own, in seven formats | Here, fails without |
+| Glossy, wrong material | Normalized vertex data divided by the host is off: a material index truncates to the one below (16-bit code 257 came back as 256) | The nearest float, worked out in integers (Marvisak/VIctory `da82e44`) | Here, fails without |
+| Wrong vertex data | `tbuffer_load_format_d16` gave the first of two halves as 32 bits | Two 16-bit channels a register (`c430b1d`) | Here |
+| Wrong pixels along edges | A helper lane in a waterfall loop took another lane's value | Its own (`0601955`) | Here: 9 of 388 pixels wrong without |
+| Shadows | The tiled cascade shadow programs ran in an approximate form on 32-lane cards, one not at all (it is in this machine's log) | Exact forms (#1002) | Its tests, here. Title: #1002, an RTX 4080 |
+| Shadows | One sampler used with and without a comparison; a comparison with a minimum or maximum became another kind | #756 | Its tests |
+| Missing, wrong, other ones in each launch | A texture uploaded before its data came; a look at 48 KiB of it; a list late | Due again when a read ends; every block looked at; #606, #632 | A block that comes last is seen in all 64 places |
+| Textures that never come, away from where the player started | Retries newest first: the older ones had no turn. Memory that changed under a texture a table showed lately was left alone for 240 frames. A view or a staging buffer that could not be made counted as done | Turns; 8 frames; tried again (after NitricAcidDev, whose changes are not pushed) | Its tests |
+| What is laid over the cutscenes, the intro | A texture that keeps changing was looked at every eighth frame and shown a list late | Looked at by every submission, copied by the list that samples it; `VICTORY_INTRO_UPLOADS` on by default | Title: NitricAcidDev, the intro only |
+| Flickering and missing meshes | Records nothing wrote charged a list's budget; LDS barriers; stale arguments; corner numbers with the edge flag in them | Free; #714; #663, #742, #743; `c0228d9` | Their tests |
+| Missing models | The host refuses a pipeline that blends an integer target | #501 | Its test; in this machine's log |
 
-Numbers with `#` are pull requests of fxceless/victory-gta6, each reviewed
-before it was taken.
+Numbers with `#` are pull requests and issues of fxceless/victory-gta6, the
+others commits of Marvisak/VIctory (the fork's parent). Each was read before
+it was taken; what it changed is said in the commit that took it.
 
-## Loading, measured here
+## Frame rate and loading
 
 | What | Before | Now |
 |------|--------|-----|
-| 3,000 host textures made | 512 ms, 1,062 MB | 42 ms, 976 MB (heaps they share) |
-| Telling whether a texture changed | 5.3 GB/s (BLAKE3), four to five times the detiling | 33 GB/s, and none for an upload that is made once |
-| A submission's texture checks | one after another | on seven threads |
-| Staging buffers kept | 512 MiB | a 32nd of the memory (2 GiB here) |
+| Submissions by a thread of the layer, fetches by a copy queue | off | on in the launcher. Others: 10 to 21 % less time a frame, the same picture, an RTX 5080 among them (fxceless #873) |
+| Compare of copies on the card | a thread a 64 KiB piece | 64 threads (#1014: about 35 to 10 ms a frame on an RTX 3060) |
+| 3,000 host textures made | 512 ms, 1,062 MB | 42 ms, 976 MB |
+| Telling whether a texture changed | 5.3 GB/s | 33 GB/s, side by side |
 | Passes before the title's bake draws | up to 1.5 s in every frame that bakes | 6 s in all, then 20 ms a second |
 
-The last is others' measurement (issue #594 there: half the frame rate, 50 to
-110 s of loading), not repeated here.
-
-## Commits since `primary` (`fb89116`)
-
-| Commit | What |
-|--------|------|
-| `447b915`, `89e5c7b` | The newest fxceless tree |
-| `e03d8d0` | Views keep their sRGB conversion; stale constants, arguments and views |
-| `459c2e3` | Textures over remapped memory |
-| `245a717` | Blocks that arrive after the upload |
-| `5ff689e` | Samplers, mesh barriers, `DispatchX` thread counts, and more |
-| `b1ac314` | Loading |
-| `6dc6e42` | Dispatches over 65,535 groups; unfilled records |
-| `bbee73d` | `lower.rs`' tests in their own file (the asset policy's size limit) |
-| this one | README rows, this handoff |
+`Launch VIctory (fast, experimental).bat` adds every other switch that was
+measured to pay in the fxceless tree (its README: 120 to 97 ms a frame in the
+first rooms). The fork's fps counter is in the corner of the picture
+(`VICTORY_FPS_COUNTER=0`: not).
 
 ## Run it
 
@@ -70,11 +67,9 @@ The last is others' measurement (issue #594 there: half the frame rate, 50 to
 diagnostics build `target-v2\diag\victory.exe`. Logs are `launch-*.log` in
 `%LOCALAPPDATA%\victory-nitric\logs`. Beside it:
 
-- `Launch VIctory (safe, to compare).bat`: the newest loading and texture
-  changes off. If something is wrong with the first and right with this one,
-  it is one of the switches below.
-- `Launch VIctory (fast, experimental).bat`: buffer copies refreshed on
-  several threads too.
+- `(safe, to compare)`: the newest changes off, frame rate switches too.
+- `(fast, experimental)`: every frame rate switch on.
+- `(squares test)`: the reflection tiling runs, two ray passes held back.
 
 `VIctory RTX 5080 test.cmd` starts **another, older build**.
 
@@ -82,58 +77,51 @@ Lines to look for in a log:
 
 | Line | What it says |
 |------|--------------|
+| `indirect compute dispatches` | the largest group count asked for, and how many records a frame are cut in two. Over 131,070 is still cut |
 | `textures in shared heaps` | heaps, textures in them, textures made on their own for the heaps' waste |
 | `writes behind the guards` | how many texture slots were uploaded before the bytes came |
-| `indirect compute dispatches` | the largest group count asked for, and how many records a frame are cut in two. **0 means the squares have another cause** |
 | `a view reads as its texture's own format` | views whose format is still not kept (first 32) |
-| `a texture picked by index changed after its upload` | textures found changed with nothing to tell of it |
-| `host pipeline refused` | pipelines that are missing from the picture |
+| `host pipeline refused` | pipelines that are missing from the picture. Expected here: `2da4beb386509b77`, `02384a60fda6f2d0`, `6b82bc7d22016cb5`, and `2cc4c197ee29e291` without the squares test |
 | `host pipelines all made` | times, translations kept and made |
 
 ## If it breaks
 
 | Seen | Try | Look at |
 |------|-----|---------|
+| Anything new | `(safe, to compare)`, then its lines one by one | |
+| The device is lost | `VICTORY_QUEUE2=0`, then `VICTORY_ASYNC_SUBMIT=0` | `queue2.rs`, `queue.rs` |
 | A crash or a wrong texture while loading | `VICTORY_PLACED_TEXTURES=0` | `placed.rs` |
-| The same | `VICTORY_WIDE_TEXTURES=0` | `host.rs` `Batch` |
-| A low frame rate with much uploaded a frame | `VICTORY_PAGE_WRITES=guards` | `descriptor/host.rs` `TextureQueue::filled` |
-| Rechecks take long | `VICTORY_HEAP_RECHECK_MIPS=0` | `texture.rs` `look_ranges` |
-| Wrong constants, flicker | `VICTORY_FILL_ON_CARD=0` | `draw.rs`, #522 |
-| Colours too dark or too bright | | `descriptor/host.rs` `keeps_gamma_view` |
+| A low frame rate with much uploaded a frame | `VICTORY_PAGE_WRITES=guards`, `VICTORY_LIVELY_TEXTURES=0` | `descriptor/host.rs`, `texture.rs` |
+| Too dark or too bright | `VICTORY_NAN_GUARD=0` | `lower.rs` `nan_guard` |
+| Colours off | | `descriptor/host.rs` `keeps_gamma_view` |
+| Shadows worse than before | | `ir.rs` (#1002) |
 | A compute pass wrong on one side of the screen | | `lower.rs` `group_id`, `draw.rs` `group_base` |
-| A texture shows another one's picture | `VICTORY_STAGING_POOL_MB=0` | `texture.rs` `SPARE`, `no_leftovers` |
-| Access violation reading title memory | | `xmem.rs` `cut` |
 | Stops at start, offset `+0x19f4f58` | | the low-address guard |
 | The whole PC is slow while it loads | `VICTORY_PIPELINE_WORKERS=8` | |
+
+## Known, and not ours to fix quickly
+
+Places the sun and lamps do not reach directly are dark: the title's
+ray-traced light needs structures whose builder does not run on 32-lane
+cards yet (fxceless #16, #512). What looks like black or missing textures in
+the prison is mostly that.
 
 ## Next
 
 1. One run, then the lines above. Confirm or drop each cause on a picture.
-2. Nine compute programs of an older cache ask for waves of 64 lanes, which
-   this card has not (the driver refuses them; `cached_compute_translations_
-   make_host_pipelines` lists them). The base splits such programs now:
-   check that none is refused any more.
-3. Two mesh programs of that cache write more than 32,768 bytes a group and
-   two pack rows of different interpolation (`dxv.exe` says so; the driver
-   took them).
+2. fxceless #854 (paired form of wave64 programs, mesh programs over 32 KiB)
+   and #799's approximate form would let the refused programs run. Large, or
+   approximate: not taken.
+3. Upstream `cd94d35` + `940d32f`: copy-backs compare only what shaders
+   marked (365 MB compared a frame for 2 MB, fxceless #650). Needs
+   `27c3dc9` and `c75fdba`: a merge of its own.
 4. Device slots `0x1c8` and `0x218`, pipeline creation that is not written.
-5. Textures of shared heaps let go leave their range unused until the heap
-   goes. Ranges could be given out again once cleared on the card.
-6. Not taken, to look at again: #583 (buffer states; many barriers), #604
-   (view instancing), the handle change of #576 (1,507 of 1,516 programs
-   make pipelines without it), the masks of #646.
-
-## Checked on this commit
-
-`cargo test --workspace` (175 GPU, 102 HLE, 228 shader tests), clippy with
-diagnostics (two warnings, both from the fxceless tree), the asset policy.
-Built with the pinned toolchain and `--features blake3/pure` (this PC has no
-C compiler). Run in parallel the GPU tests crash in 2 to 4 of 100 runs: all
-four stacks taken are inside `d3d10warp.dll`, the software renderer some of
-them use and the game does not. None crash with `--test-threads=1`.
+5. fxceless #827's descriptor cache (40,000 to 113,000 views made a frame).
+6. `codex/shader-coverage` (`a71d96a`): see the merge notes.
 
 ## Rules here
 
-Push to `secondary-test` only, never by force. Fetch first: the branch has
-been replaced while work was under way. Nothing of the game goes into Git.
-The player uses a controller: do not send input or take the focus.
+Push to `secondary-test`, never by force; to `main` and `primary` only when
+the owner of the request says so. Fetch first: the branch has been replaced
+while work was under way. Nothing of the game goes into Git, nor logs that
+hold it. The player uses a controller: do not send input or take the focus.

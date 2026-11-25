@@ -6,8 +6,8 @@ timing lines of local runs; nothing of the game is quoted.
 
 ## What to do
 
-`secondary-test` contains `primary` (`fb89116`), so `primary` takes it as a
-fast-forward:
+`secondary-test` contains `primary` (`e0be79c`) and `main` (`2577c6e`), so
+either takes it as a fast-forward:
 
 ```powershell
 git fetch origin
@@ -31,6 +31,9 @@ Check after any merge that these are still there:
 | `crate::placed::create` | `crates/victory-gpu/src/resource.rs` |
 | `fn group_id(` and `fn group_base(` | `lower.rs`, `draw.rs` |
 | `rest` in the clamp's source | `crates/victory-gpu/src/indirect.rs` |
+| `fn norm_quotient(`, `fn helper_reads_own(`, `fn nan_guard(` | `lower.rs` |
+| `fn keeps_changing(` and its two uses | `crates/victory-gpu/src/texture.rs` |
+| `TABLED_GRACE` in `texture_slots_remapped` and `slots_written_under` | `crates/victory-gpu/src/descriptor/host.rs` |
 
 A new `VICTORY_*` switch the translator reads joins the shader cache's key by
 itself. Files named `*_tests.rs` in `victory-shader` do not change it.
@@ -39,9 +42,16 @@ itself. Files named `*_tests.rs` in `victory-shader` do not change it.
 
 See the tables of [the handoff](HANDOFF-secondary-test.md). In one line each:
 
-| Change | Here | `primary` (`fb89116`) |
+| Change | Here | `primary` (`e0be79c`) |
 |--------|------|-----------------------|
-| fxceless tree | `9376fd6` | `c96b4f2` |
+| fxceless tree | `d510ee4` | `c96b4f2` |
+| Normalized vertex data | the nearest float | the host's division (16-bit code 257 reads as 256 on an RTX 5080) |
+| Helper lanes in waterfall loops | their own value | another lane's |
+| Tiled cascade shadows on 32-lane cards | exact | approximate, one program refused |
+| Textures that keep changing | looked at by every submission | every eighth frame, a list late |
+| Texture retries | in turns, never given up | newest first; failures counted as done |
+| Compare on the card | 64 threads a piece | one |
+| Queues | `VICTORY_ASYNC_SUBMIT`, `VICTORY_QUEUE2` there to switch on | not there |
 | sRGB and linear views of one texture | kept, seven formats | read in the texture's own |
 | Data that arrives after an upload | uploaded | kept as it was, but for 48 KiB looked at (`f42cea6`) |
 | Compute records over 65,535 groups | run whole | cut |
@@ -83,8 +93,8 @@ already in `primary` (`90228a7`).
 
 ## What this does not show
 
-- None of the loading changes has been run with the title yet. The unit
-  benchmarks say the waits are gone; frame times need a run.
+- None of this has been run with the title on the machine it was made on.
+  The unit benchmarks say the waits are gone; frame times need a run.
 - The write benchmark uses pages that are already resident. The first write
   of a page still faults it in.
 - Sixteen workers use more memory and processor time while the title loads.

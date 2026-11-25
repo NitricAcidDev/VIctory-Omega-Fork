@@ -1,22 +1,39 @@
-# Merging `secondary-test`: notes for the agent that does it
+# `secondary-test` and `primary`: how they were merged
 
 Written 25 November 2026 for whoever works on `primary`. Everything here is
 AI-assisted. Numbers come from synthetic programs, unit benchmarks and the
 timing lines of local runs; nothing of the game is quoted.
 
-## What to do
+## What was done
 
-`secondary-test` contains `primary` (`e0be79c`) and `main` (`2577c6e`), so
-either takes it as a fast-forward:
+`secondary-test` took `primary` (`ccf29aa`) and was then fast-forwarded onto
+it: the two are one commit. Work goes on `primary`.
 
-```powershell
-git fetch origin
-git switch primary
-git merge --ff-only origin/secondary-test
-```
+What both sides had, and what was kept:
 
-If `primary` has moved, merge; do not take one side whole. The fxceless tree
-was taken whole once and dropped the low-address guard without a conflict.
+| Feature | `primary` (`ccf29aa`) | Here before (`25004ee`) | Kept |
+|---------|-----------------------|-------------------------|------|
+| Queue of textures picked by index | those uploaded in part first, half of each batch | the others longest due and newest in turns | both |
+| Memory under a table's texture | tracked always | tracked 8 frames after a table read | tracked always, looked at after 8 frames, two slots a texture |
+| A view that could not be made | tried at every read | tried after 8, 16, ... 256 frames | here |
+| What a look at a texture reads | 12 windows of 4 KiB over it | 16 KiB at its start, middle and end, and each level and block | 12 windows, levels and blocks: of 86 blocks of a 2048 texture 12, 86, **86** seen; of its 1,376 pages 12, 103, **105** |
+| Pipelines kept by a list | once each (after Belobug) | at every use | primary |
+| Readbacks of pieces that touch | joined, direct queue | one by one | primary, on the copy queue too |
+| Hash passes over neighbours | joined | joined on request | primary |
+| Hash of a piece on the card | 64 threads, tree | 64 threads, one adds up (#1014) | here; not raced |
+| Integer targets that blend | own function | own function, the same 21 formats | here, both tests |
+| A full card | textures that exist are refreshed (after DexNom) | refused at the limit | primary |
+| Descriptor data from a load of another width | yes (after DexNom) | no | primary |
+| Wave masks restored from scalar copies | yes (after DexNom) | no | primary |
+| Captures on request | without automatic ones | with | primary |
+
+The automatic merge dropped one line of ours without a conflict
+(`made[index] = key`, in `mirror`): every slot would have been made again at
+each read. It was found and put back before any build had it. Look at what a
+merge removes, not only at its conflicts.
+
+If the branches move apart again, merge; do not take one side whole. The
+fxceless tree was taken whole once and dropped the low-address guard without a conflict.
 Check after any merge that these are still there:
 
 | Look for | Where |
@@ -34,6 +51,9 @@ Check after any merge that these are still there:
 | `fn norm_quotient(`, `fn helper_reads_own(`, `fn nan_guard(` | `lower.rs` |
 | `fn keeps_changing(` and its two uses | `crates/victory-gpu/src/texture.rs` |
 | `TABLED_GRACE` in `texture_slots_remapped` and `slots_written_under` | `crates/victory-gpu/src/descriptor/host.rs` |
+| `made[index as usize] = key;` before `make(&view` | the same |
+| `stand_in_light` after both kinds of dispatch, `sky_drawn` in `prepare_for` | `crates/victory-gpu/src/draw.rs` |
+| `USER_STRUCTURES` asked by `intersect.rs`, answered in `draw.rs` | `crates/victory-shader/src/emit`, `victory-gpu` |
 
 A new `VICTORY_*` switch the translator reads joins the shader cache's key by
 itself. Files named `*_tests.rs` in `victory-shader` do not change it.
@@ -42,9 +62,14 @@ itself. Files named `*_tests.rs` in `victory-shader` do not change it.
 
 See the tables of [the handoff](HANDOFF-secondary-test.md). In one line each:
 
-| Change | Here | `primary` (`e0be79c`) |
+| Change | Here | `primary` before (`ccf29aa`) |
 |--------|------|-----------------------|
-| fxceless tree | `d510ee4` | `c96b4f2` |
+| fxceless tree | `085ee7c` | `c96b4f2` |
+| Light where the sun and lamps do not reach | a stand-in that follows the sky | black |
+| Rays while nothing builds their structures | hit nothing | walk what lies there |
+| Reflections without rays | held to half of the light around | the open sky's, indoors too |
+| Pass over buffer views | what was written | 11,000 to 26,000 slots a frame |
+| Reads into the title's pages | wait for its Submit | begin before |
 | Normalized vertex data | the nearest float | the host's division (16-bit code 257 reads as 256 on an RTX 5080) |
 | Helper lanes in waterfall loops | their own value | another lane's |
 | Tiled cascade shadows on 32-lane cards | exact | approximate, one program refused |

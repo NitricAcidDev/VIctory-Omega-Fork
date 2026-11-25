@@ -12,7 +12,7 @@ game assets, executables, or shaders.
 |---|---|
 | Menus and opening video | Around 30 FPS in local runs. The launcher enables the texture refresh fix that stopped the alternating intro frames in user testing. |
 | Prologue and early gameplay | Characters, subtitles, interiors, and exteriors can render. Walls and material detail can arrive late or disappear. |
-| Lighting and materials | Dark squares can appear as a shot fills in, and some fabric looks overly glossy. Indirect lighting and parts of the shadow pipeline remain incomplete. |
+| Lighting and materials | Dark squares can appear as a shot fills in, and some fabric looks overly glossy. Ray-traced light does not run: a stand-in that follows the game's sky lights what the sun and lamps do not reach, reflections are held to it, and the game's rays hit nothing instead of reading what happens to be in memory (new, not yet seen in the game here). |
 | Performance | Series X runs on an RTX 5060 Ti were around 2 FPS once in the prologue, with slower intervals during asset loading. The same evening a run on an RTX 5080 held 3 to 7 FPS in the opening cutscene and about 5 FPS in the prologue (5,700 to 7,000 draws a frame). |
 | Card memory | That run stood at 13.0 of 13.8 GB from the first world frame on: textures that needed a place waited, faces and clothes among them. `VICTORY_LEVELS_ON_DEMAND=1` leaves out the levels the title has not loaded. |
 
@@ -46,7 +46,8 @@ shader translations and host pipelines still fail. See
 - [VIctory](https://github.com/Marvisak/VIctory) by Marvisak and contributors is the base project.
 - [fxceless/victory-fork](https://github.com/fxceless/victory-fork) contributed rendering work, including indexed texture rechecks.
 - [DexNom Runtime](https://github.com/DexNom/VIctory) informed the resident texture refresh behavior.
-- [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD) informed pipeline reference reuse.
+- [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD) informed pipeline reference reuse; the stand-in light and the held reflections are Belobug's, brought to this tree first by m335671.
+- PiloteCode made the game's rays hit nothing while nothing builds their structures (fxceless #994).
 - [XCL](https://github.com/ivall/xcl) served as a behavior reference.
 
 VIctory Omega Fork is GPL-3.0-or-later.
@@ -690,6 +691,13 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 | `VICTORY_PAGE_WRITES=guards` | what the storage layer writes under a texture already uploaded is not uploaded again (unset is `all`) |
 | `VICTORY_HEAP_RECHECK_MIPS=0` | a look at an uploaded texture reads three places of it, not every mip and block |
 | `VICTORY_FILL_ON_CARD=0` | constants a running submission writes are filled on the processor, after waiting for it |
+| `VICTORY_AMBIENT=off` | the game's own indirect light, black while its rays do not run (a number: the level where the sky is not known yet) |
+| `VICTORY_AMBIENT_SKY=off`, `=gain,least,power` | the stand-in light is constant; its level is `gain * sky^power + least` (0.36,0.05,0.4) |
+| `VICTORY_AMBIENT_REFLECT=<part>` | the most a reflection holds, as a part of that light (0.5; 0: left alone); `VICTORY_AMBIENT_REFLECT_LEAST` the least (0) |
+| `VICTORY_AMBIENT_SHADE=strength,radius` | how much less of it reaches creases (1.0,0.6) |
+| `VICTORY_AMBIENT_FILE=<file>` | the same numbers read twice a second from a file (diagnostics builds) |
+| `VICTORY_BVH_NO_HIT=0` | the game's rays walk whatever lies where nothing built their structures |
+| `VICTORY_PROBE_RAYS=1` | the program that tells the probes which rays to trace runs without rays |
 | `VICTORY_LIVELY_TEXTURES=0` | a texture whose memory keeps changing (a movie, what is laid over a cutscene) is treated as any other: a change no guard saw is found every eighth frame and shown by the next list |
 | `VICTORY_INTRO_UPLOADS=0` | the same until the first 3D frame: without the uploads at every list that ended the intro's flicker |
 | `VICTORY_NAN_GUARD=0` | a NaN or an infinity a pixel program exports goes into the colour target as it is (a bad pixel then stays in what the title blends into every frame); `stores`: typed stores are guarded too |

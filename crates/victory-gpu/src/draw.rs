@@ -1077,6 +1077,13 @@ impl State {
         if !self.bind(list, p, false) {
             return false;
         }
+        // The sky the stand-in light follows.
+        if crate::ambient::level().is_some()
+            && let Some(&sky) = self.targets.first()
+            && p.stages.iter().any(|s| s.shader.light() == crate::pipeline::Light::Sky)
+        {
+            crate::ambient::sky_drawn(sky);
+        }
         let l = &list.list;
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
@@ -2379,6 +2386,11 @@ impl State {
             crate::pipeline::note_why("a walk of ray-tracing structures that are not built (VICTORY_BVH_HOLD=1)".to_owned());
             return;
         }
+        if crate::pipeline::idle_without_rays(self.pipeline as This) {
+            #[cfg(feature = "diagnostics")]
+            crate::pipeline::note_why("the screen probes' rays are told what to trace, and do not run".to_owned());
+            return;
+        }
         // The ray-tracing structure builder's stages run all or none.
         if crate::pipeline::is_builder(self.pipeline as This) && !crate::pipeline::builder_runs() {
             DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -2436,6 +2448,54 @@ impl State {
             }
         }
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+        self.stand_in_light(list, p);
+    }
+
+    /// After a dispatch of `p`: the stand-in light ([`crate::ambient`]), if
+    /// it is a program that light follows.
+    fn stand_in_light(&mut self, list: &HostList, p: &HostPipeline) {
+        use crate::pipeline::Light;
+        if crate::ambient::level().is_none() {
+            return;
+        }
+        let Some((stage, light)) = p.stages.first().map(|s| (s, s.shader.light())) else {
+            return;
+        };
+        if !matches!(light, Light::Resolve | Light::Reflections) {
+            return;
+        }
+        let view = |kind: ResourceType, (slot, offset): (u8, u32)| {
+            let u = stage.translated().used.iter().find(|u| {
+                u.kind == kind && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+            })?;
+            let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(u.slot)) else {
+                return None;
+            };
+            crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4)
+        };
+        let written = |at| match view(ResourceType::Uav, at) {
+            Some(View::Unordered(r, ..)) if r != 0 => Some(r as This),
+            _ => None,
+        };
+        let recorded = if light == Light::Reflections {
+            written(crate::ambient::REFLECTIONS).is_some_and(|image| crate::ambient::hold(list, image))
+        } else if let Some(image) = written(crate::ambient::LIGHT) {
+            let depth = match view(ResourceType::Srv, crate::ambient::DEPTH) {
+                Some(View::Shader(r, _)) => Some(r as This),
+                _ => None,
+            };
+            crate::ambient::raise(list, image, depth)
+        } else {
+            once!("no stand-in light: other tables");
+            false
+        };
+        if recorded {
+            // The pass set its own pipeline, root signature and heap: the
+            // next bind sets the title's again.
+            self.host_pipeline = 0;
+            self.host_roots = [0; 2];
+            self.host_heaps = [0; 2];
+        }
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -3269,6 +3329,11 @@ impl State {
             crate::pipeline::note_why("a walk of ray-tracing structures that are not built (VICTORY_BVH_HOLD=1)".to_owned());
             return false;
         }
+        if crate::pipeline::idle_without_rays(self.pipeline as This) {
+            #[cfg(feature = "diagnostics")]
+            crate::pipeline::note_why("the screen probes' rays are told what to trace, and do not run".to_owned());
+            return false;
+        }
         const DRAW: u32 = 0;
         const INDEXED: u32 = 1;
         const DISPATCH: u32 = 2;
@@ -3602,6 +3667,7 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            self.stand_in_light(list, p);
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }

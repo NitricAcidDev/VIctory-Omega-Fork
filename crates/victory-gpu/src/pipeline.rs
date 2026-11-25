@@ -67,6 +67,25 @@ pub(crate) struct Shader {
     /// ([`Shader::walks`]).
     #[cfg(windows)]
     walks: OnceLock<bool>,
+    /// What it is to the stand-in light, once looked at ([`Shader::light`]).
+    #[cfg(windows)]
+    light: OnceLock<Light>,
+}
+
+/// What a program is to the stand-in light ([`crate::ambient`]).
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Light {
+    /// Nothing.
+    None,
+    /// It resolves the title's indirect diffuse light.
+    Resolve,
+    /// It writes the title's reflections for the last time in a frame.
+    Reflections,
+    /// It draws the sky as the title reflects it.
+    Sky,
+    /// It tells the screen probes which rays to trace.
+    Rays,
 }
 
 impl std::fmt::Debug for Shader {
@@ -119,6 +138,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 translated: OnceLock::new(),
                 #[cfg(windows)]
                 walks: OnceLock::new(),
+                #[cfg(windows)]
+                light: OnceLock::new(),
             })
         })
         .clone()
@@ -284,6 +305,67 @@ impl Shader {
     /// at once, when a dispatch first asks.
     fn walks(&self) -> bool {
         *self.walks.get_or_init(|| container_walks(&self.container))
+    }
+
+    /// What the program is to the stand-in light, by the name in its
+    /// container. Looked at once, when a draw or dispatch first asks.
+    pub(crate) fn light(&self) -> Light {
+        *self.light.get_or_init(|| light_of(self.stage, &self.container))
+    }
+}
+
+/// [`Shader::light`] of a container.
+#[cfg(windows)]
+fn light_of(stage: &str, container: &[u8]) -> Light {
+    let names: &[(&[u8], Light)] = match stage {
+        "compute" => &[
+            (crate::ambient::PROGRAM, Light::Resolve),
+            (crate::ambient::REFLECTED, Light::Reflections),
+            (crate::ambient::ACTIVATE, Light::Rays),
+        ],
+        "pixel" => &[(crate::ambient::SKY, Light::Sky)],
+        _ => &[],
+    };
+    let named = |name: &[u8]| container.windows(name.len()).any(|w| w == name);
+    names.iter().find(|(name, _)| named(name)).map_or(Light::None, |&(_, light)| light)
+}
+
+/// Whether a dispatch with the title's pipeline `this` is left out because
+/// its program only serves the title's rays, which do not run: the one that
+/// tells the screen probes which rays to trace. With nothing behind it the
+/// picture loses light, shadows and reflections (Belobug/VIctory-Belobug-AMD
+/// `6986a57`). `VICTORY_PROBE_RAYS=1` has it run, and so do the stand-in
+/// light off and the structure builder on.
+#[cfg(windows)]
+pub(crate) fn idle_without_rays(this: This) -> bool {
+    static KEEP: OnceLock<bool> = OnceLock::new();
+    if this.is_null()
+        || crate::ambient::level().is_none()
+        || *KEEP.get_or_init(|| std::env::var_os("VICTORY_PROBE_RAYS").is_some_and(|v| v == "1"))
+    {
+        return false;
+    }
+    let p = pipeline(this);
+    if !matches!(&p.shaders[..], [s] if s.stage == "compute" && s.light() == Light::Rays) {
+        return false;
+    }
+    !BUILDER.lock().unwrap_or_else(|e| e.into_inner()).whole
+}
+
+#[cfg(all(test, windows))]
+mod light_tests {
+    use super::{Light, light_of};
+
+    #[test]
+    fn programs_are_told_by_the_name_in_their_container_and_their_stage() {
+        let named = |name: &str| [&b"head\0"[..], name.as_bytes(), b"_x\0tail"].concat();
+        assert_eq!(light_of("compute", &named("CS_ScreenProbes_TemporalResolve_Full")), Light::Resolve);
+        assert_eq!(light_of("compute", &named("CS_UpdateHistory")), Light::Reflections);
+        assert_eq!(light_of("compute", &named("CS_ScreenProbes_ActivateRays")), Light::Rays);
+        assert_eq!(light_of("pixel", &named("ps_sky_paraboloid_reflection")), Light::Sky);
+        assert_eq!(light_of("pixel", &named("CS_UpdateHistory")), Light::None);
+        assert_eq!(light_of("compute", &named("ps_sky_paraboloid_reflection")), Light::None);
+        assert_eq!(light_of("compute", b"CS"), Light::None);
     }
 }
 
@@ -990,6 +1072,7 @@ mod cached_tests {
                                 container: Vec::new(),
                                 translated: OnceLock::from(Some(Translated { host, used: Vec::new(), stores: true, threads: [0; 3] })),
                                 walks: OnceLock::new(),
+                                light: OnceLock::new(),
                             });
                             match host::HostPipeline::new(std::slice::from_ref(&shader), None) {
                                 Some(_) => _ = made.fetch_add(1, std::sync::atomic::Ordering::Relaxed),

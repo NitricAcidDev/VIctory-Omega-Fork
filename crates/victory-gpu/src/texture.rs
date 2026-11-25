@@ -2094,7 +2094,7 @@ mod cost_tests {
             })
             .unwrap();
             let size = layout.size as usize;
-            let tiled: Vec<u8> = (0..size).map(|i| (i * 31 >> 9) as u8).collect();
+            let tiled: Vec<u8> = (0..size).map(|i| ((i * 31) >> 9) as u8).collect();
             let pitch = (side as usize / 4 * 16).next_multiple_of(256);
             let rows = side as usize / 4;
             let mut plain = vec![0u8; pitch * rows];
@@ -2330,7 +2330,7 @@ mod look_tests {
     #[test]
     fn a_block_that_arrives_last_is_seen() {
         for layout in [bc7(2048, 12), bc7(1024, 1)] {
-            let mut memory: Vec<u8> = (0..layout.size).map(|i| (i * 31 >> 9) as u8).collect();
+            let mut memory: Vec<u8> = (0..layout.size).map(|i| ((i * 31) >> 9) as u8).collect();
             let at = memory.as_ptr() as u64;
             let ranges = look_ranges(&layout);
             let starts = layout.sample_ranges(MIP_WINDOW, MIP_RANGES);
@@ -2358,7 +2358,7 @@ mod look_tests {
     fn look_costs() {
         for (side, mips) in [(256, 1), (512, 10), (1024, 11), (2048, 12), (4096, 13)] {
             let layout = bc7(side, mips);
-            let memory: Vec<u8> = (0..layout.size).map(|i| (i * 31 >> 9) as u8).collect();
+            let memory: Vec<u8> = (0..layout.size).map(|i| ((i * 31) >> 9) as u8).collect();
             let at = memory.as_ptr() as u64;
             let ranges = look_ranges(&layout);
             let time = |ranges: &[(u64, u64)]| {

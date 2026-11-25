@@ -191,7 +191,7 @@ pub fn shader_opt() -> u32 {
 }
 
 /// The switches a translation may depend on (environment variables).
-const SWITCHES: [&str; 11] = [
+const SWITCHES: [&str; 13] = [
     "VICTORY_F16_NEAREST",
     "VICTORY_FIRSTLANE_OWN",
     "VICTORY_FIRST_HALF",

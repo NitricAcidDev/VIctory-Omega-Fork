@@ -190,50 +190,38 @@ pub fn shader_opt() -> u32 {
     *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
 }
 
-/// The switches a translation may depend on (environment variables).
-const SWITCHES: [&str; 13] = [
-    "VICTORY_F16_NEAREST",
-    "VICTORY_FIRSTLANE_OWN",
-    "VICTORY_FIRST_HALF",
-    "VICTORY_GROUP_SYNC",
-    "VICTORY_MESH_OUTPUT_STRICT",
-    "VICTORY_SHADER_LOOP_LIMIT",
-    "VICTORY_SHADER_OPT",
-    "VICTORY_STRICT_JOINS",
-    "VICTORY_WAVE_DEEP_SKIPS",
-    "VICTORY_WAVE_LOCAL",
-    "VICTORY_WAVE_OWN_BITS",
-    "VICTORY_WAVE_WHY",
-    "VICTORY_WAVE_WIDE",
-];
-
-/// What a translation depends on besides the container: the translator (a
-/// hash of its sources, `build.rs`), its switches and what it was told of
-/// the host. Two processes with the same id translate a container to the
-/// same bytes, so translations kept on disk outlive rebuilds of everything
-/// else. Ask after [`set_view_heap_limit`] and [`set_host_max_wave`].
-pub fn translator_id() -> Vec<u8> {
-    let mut id = env!("VICTORY_TRANSLATOR_HASH").as_bytes().to_vec();
-    for name in SWITCHES {
-        id.extend_from_slice(name.as_bytes());
+/// Everything a translation depends on besides the container: the
+/// translator's own source (hashed at build time, `build.rs`), the value of
+/// every `VICTORY_*` switch it reads, the host facts the device hands it
+/// (widest wave, view heap limit) and the settings above. Two processes with
+/// the same fingerprint translate a container to the same bytes, so the
+/// shader cache keys on this instead of on the whole executable, and a
+/// rebuild that leaves the translator alone keeps its translations. Call it
+/// after the device is made.
+pub fn translation_fingerprint() -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(env!("VICTORY_SHADER_SOURCE_HASH").as_bytes());
+    out.push(u8::from(cfg!(feature = "diagnostics")));
+    out.push(u8::from(cfg!(debug_assertions)));
+    for name in env!("VICTORY_SHADER_SWITCHES").split(',').filter(|n| !n.is_empty()) {
+        out.extend_from_slice(name.as_bytes());
         // Unset is not the same as set to nothing.
         match std::env::var_os(name) {
             Some(value) => {
-                id.push(b'=');
-                id.extend_from_slice(value.as_encoded_bytes());
+                out.push(b'=');
+                out.extend_from_slice(value.as_encoded_bytes());
             }
-            None => id.push(b'-'),
+            None => out.push(b'-'),
         }
-        id.push(0);
+        out.push(0);
     }
     // As they were understood, whatever the variables say by now.
-    id.extend_from_slice(&loop_limit().to_le_bytes());
-    id.push(group_sync());
-    id.extend_from_slice(&shader_opt().to_le_bytes());
-    id.extend_from_slice(&shader::view_heap_limit().to_le_bytes());
-    id.extend_from_slice(&lower::host_max_wave().to_le_bytes());
-    id.push(u8::from(cfg!(feature = "diagnostics")));
-    id
+    out.extend_from_slice(&lower::host_max_wave().to_le_bytes());
+    out.extend_from_slice(&shader::view_heap_limit().to_le_bytes());
+    out.extend_from_slice(&loop_limit().to_le_bytes());
+    out.push(group_sync());
+    out.extend_from_slice(&shader_opt().to_le_bytes());
+    out
 }
 
 /// `VICTORY_SHADER_OPT`'s value; every pass when it is unset or
@@ -318,7 +306,23 @@ pub struct UserData {
 
 /// Translates the vertex, pixel, compute or mesh program of a console
 /// shader container.
+///
+/// A program refused because the first half of an interpolation is read as
+/// data is translated once more with first halves evaluated as the pair
+/// they start (`lower::with_first_half_pairs`), and only such a program:
+/// with that on for every program, 8,551 pixel programs of the title that
+/// already translated came out changed (an extra evaluation in each), for
+/// the sake of 9 that did not translate.
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
+    match translate_plain(container) {
+        Err(ShaderError::Unsupported { what, .. }) if what == lower::FIRST_HALF => {
+            lower::with_first_half_pairs(|| translate_plain(container))
+        }
+        other => other,
+    }
+}
+
+fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
         .part(FourCC::DXIL)

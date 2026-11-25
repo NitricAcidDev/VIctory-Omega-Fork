@@ -1,7 +1,10 @@
-//! What identifies the translator: a hash of its sources, so translations
-//! kept on disk outlive rebuilds that do not change it
-//! (`emit::translator_id`).
+//! What identifies the translator, for translations kept on disk
+//! (`emit::translation_fingerprint`, `victory-gpu`'s `shader_cache`): a hash
+//! of its sources, so a rebuild that does not change them keeps the
+//! translations, and the names of every `VICTORY_*` switch they read, whose
+//! values join the key at run time. Writes nothing but cargo directives.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Two FNV-1a hashes with different starts: not against anyone's will, only
@@ -35,6 +38,21 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The quoted `VICTORY_*` names in `text`.
+fn switches(text: &str, out: &mut BTreeSet<String>) {
+    let mut rest = text;
+    while let Some(at) = rest.find("\"VICTORY_") {
+        let tail = &rest[at + 1..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .unwrap_or(tail.len());
+        if tail[end..].starts_with('"') {
+            out.insert(tail[..end].to_owned());
+        }
+        rest = &tail[end..];
+    }
+}
+
 fn main() {
     println!("cargo::rerun-if-changed=src");
     println!("cargo::rerun-if-changed=build.rs");
@@ -59,16 +77,20 @@ fn main() {
         .collect();
     named.sort();
     let mut hash = Hash(0xcbf2_9ce4_8422_2325, 0x1234_5678_9abc_def0);
+    let mut names = BTreeSet::new();
     for (name, file) in named {
         let mut bytes = std::fs::read(&file).expect("a source of the crate");
         bytes.retain(|&b| b != b'\r');
         hash.add(name.as_bytes());
         hash.add(&bytes);
+        switches(&String::from_utf8_lossy(&bytes), &mut names);
     }
     // And the compiler (what it folds of the float code is its own).
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     if let Ok(out) = std::process::Command::new(rustc).arg("-vV").output() {
         hash.add(&out.stdout);
     }
-    println!("cargo::rustc-env=VICTORY_TRANSLATOR_HASH={:016x}{:016x}", hash.0, hash.1);
+    println!("cargo::rustc-env=VICTORY_SHADER_SOURCE_HASH={:016x}{:016x}", hash.0, hash.1);
+    let names: Vec<String> = names.into_iter().collect();
+    println!("cargo::rustc-env=VICTORY_SHADER_SWITCHES={}", names.join(","));
 }

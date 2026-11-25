@@ -9929,11 +9929,14 @@ impl<'a> Lower<'a> {
             if self.block[*right].is_none() {
                 return self.image_with_sampler(inst, b, i, Some(first));
             }
-            let edge = |pred: usize| {
-                self.edges.get(&(pred, *block)).copied().or(self.tail[pred])
+            let edge = |pred: usize, second: bool| {
+                self.edges
+                    .get(&(pred, *block, second))
+                    .copied()
+                    .or(self.tail[pred])
                     .ok_or("a sampler choice with an unfinished predecessor")
             };
-            let (left, right) = (edge(*left)?, edge(*right)?);
+            let (left, right) = (edge(*left, false)?, edge(*right, left == right)?);
             let join = self.block[*block].ok_or("a sampler choice without a host block")?;
             let chosen = self.s.m.phi(join, self.s.t.i1);
             let (yes, no) = (self.s.m.bool(true), self.s.m.bool(false));

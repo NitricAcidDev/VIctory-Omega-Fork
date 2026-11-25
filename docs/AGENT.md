@@ -6,6 +6,30 @@ For the next agent (ChatGPT/Codex, Claude or a person). Written 25 November
 [the merge notes](secondary-test-merge-notes.md). `AGENTS.md` in the root
 holds the repository's own rules and wins over this file.
 
+## Latest Codex verification, 25 November
+
+`primary` integrates fxceless `9c184b3` while preserving the fork's buffer
+offsets, UAV reads, mapping leases, readback layouts and streaming changes.
+Its diagnostics exe is rebuilt. The full run passed 257 GPU, 257 shader and
+195 other tests. Wide-load offset/UAV tests, Clippy, policy, and the GPU
+crate without diagnostics also passed (Clippy has warnings).
+
+The timed warm-up now stops scanning additional files after its deadline.
+Its zero-second CLI check returned in 0.07 s. A completed warm-up found
+3,184 matching shaders from the earlier normal run, all cached, with zero
+translation failures. This is coverage of recorded requests, not the full
+retail shader corpus or proof of a complete picture. Matching driver
+pipelines can reuse the retained pipeline library.
+
+The separate `ray-tracing-test` branch has the same upstream update and
+an RT fallback handoff fix: builder startup alone no longer ends the light
+while ray passes or world pipelines are unready. Its full run passed 262
+GPU, 310 shader and 195 other tests. The owner's preceding RT run was black
+around 1 FPS while compilation and texture allocations were pending. That
+failure is not declared fixed by synthetic tests. Updated executables have
+not been run with the title. Use the existing extra-memory launchers for
+the next controlled comparison, with the owner using the controller.
+
 ## 1. What the owner of the request wants
 
 In their words, sorted. Work through it without asking questions; they have

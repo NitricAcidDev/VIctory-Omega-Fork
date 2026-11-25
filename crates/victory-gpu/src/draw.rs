@@ -2163,12 +2163,23 @@ impl State {
             let placed = view.as_ref().and_then(crate::descriptor::host::placed_texture);
             let resource = match placed.as_ref().or(view.as_ref()) {
                 Some(&View::Shader(resource, _)) => resource as This,
+                // The title still names this texture: if its host copy
+                // could not be made, it is tried again (after
+                // NitricAcidDev).
+                _ if matches!(view, Some(View::Placed(false, ..))) => {
+                    host.texture_slot_later(index, write, frame, most);
+                    continue;
+                }
                 _ => {
                     host.texture_slot_done(index, write, None);
                     continue;
                 }
             };
-            let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
+            let Some(copy) = crate::resource::host_resource(resource) else {
+                host.texture_slot_later(index, write, frame, most);
+                continue;
+            };
+            let title_fills = crate::texture::title_written(copy);
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);
@@ -2192,7 +2203,13 @@ impl State {
                 crate::host::log_removal_context();
                 return;
             }
-            let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
+            let Some((bytes, whole)) = crate::texture::staged(resource) else {
+                // Its staging buffer could not be made now: nothing was
+                // uploaded, and it is tried again. (It counted as a
+                // texture uploaded whole; after NitricAcidDev.)
+                host.texture_slot_later(index, write, frame, most);
+                continue;
+            };
             // Not all of it there: looked at again next frame, and from
             // then on as a slot with nothing new (a placed texture: until
             // more of it is mapped; a texture object at an address the

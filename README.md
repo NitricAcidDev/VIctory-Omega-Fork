@@ -1,34 +1,63 @@
-# VIctory fork (work in progress)
+# VIctory Omega Fork
 
-A work-in-progress fork of [VIctory](https://github.com/Marvisak/VIctory), a
-compatibility layer that runs an Xbox Series title natively on Windows from
-files the user supplies. This fork follows upstream
-`main` and adds fixes aimed at one goal: getting the game's world to render
-correctly and playably on one particular PC.
+VIctory Omega Fork is an experimental Windows compatibility layer based on
+[Marvisak’s VIctory](https://github.com/Marvisak/VIctory). Its current focus is
+cutscene rendering and asset streaming on NVIDIA GPUs. Use your own local
+Xbox Series game files. The title runs offline, and the repository contains no
+game assets, executables, or shaders.
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's
-developer or publisher.
+## Current state (2026-11-25)
+
+| Area | Observed behavior |
+|---|---|
+| Menus and opening video | Around 30 FPS in local runs. The launcher enables the texture refresh fix that stopped the alternating intro frames in user testing. |
+| Prologue and early gameplay | Characters, subtitles, interiors, and exteriors can render. Walls and material detail can arrive late or disappear. |
+| Lighting and materials | Dark squares can appear as a shot fills in, and some fabric looks overly glossy. Indirect lighting and parts of the shadow pipeline remain incomplete. |
+| Performance | Series X runs on an RTX 5060 Ti were around 2 FPS once in the prologue, with slower intervals during asset loading. The same evening a run on an RTX 5080 held 3 to 7 FPS in the opening cutscene and about 5 FPS in the prologue (5,700 to 7,000 draws a frame). |
+| Card memory | That run stood at 13.0 of 13.8 GB from the first world frame on: textures that needed a place waited, faces and clothes among them. `VICTORY_LEVELS_ON_DEMAND=1` leaves out the levels the title has not loaded. |
+
+Start with [Launch VIctory.cmd](Launch%20VIctory.cmd). It builds the current
+checkout with frame capture support. Choose **1** to reuse the previous game
+path or **2** to select it. Keep the game files outside the repository. To
+capture a problem shot, run [Capture VIctory Interior Frame.cmd](Capture%20VIctory%20Interior%20Frame.cmd)
+while the game is open. It saves the next frame, its render targets, and a draw
+log locally, alongside the checkout under `logs/primary`.
+
+The fork keeps remap notifications under load, refreshes partially streamed
+textures, and rechecks indexed textures that can change after upload. The
+cutscene queue gives partially uploaded textures their own turn so they can
+finish alongside new requests. Under VRAM pressure, textures with an existing
+GPU allocation can still refresh. The runtime also batches and parallelizes GPU
+buffer checks and keeps each pipeline once per command list. A gameplay FPS
+gain from these changes has yet to be established.
+
+For a performance comparison, run `.\victory-normal-launch.ps1 -Performance`
+in PowerShell. This enables background GPU readback processing so the runtime
+can prepare later submissions while earlier ones finish. Compare the same 3D
+scene after assets and pipelines settle. The run log records the frame-time
+breakdown.
+
+Ray tracing remains experimental and disabled by default. Some required
+shader translations and host pipelines still fail. See
+[the ray-tracing notes](docs/fork-ray-tracing.md) for what works and what is missing.
 
 ## Credits
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors is the base of everything here: the loader, the runtime
-  services, the Direct3D 12 back end and the shader recompiler. Licensed
-  GPL-3.0-or-later; so is this fork. Upstream's history is kept intact below
-  the single commit that carries this fork's changes.
-- **[XCL](https://github.com/ivall/xcl)** by ivall and its contributors
-  (GPL-2.0-only) was used as a reference for how the same title behaves under
-  another layer. Fixes inspired by it were written anew in VIctory's code.
-- The guard over every view of a memory page is code by **myokex**
-  ([victory-amd](https://github.com/myokex/victory-amd), commit `c6dc4d8`), which
-  adapts pull request #115 here by Spexivus, its correction by joroyt and a part of
-  VIctory #1122 by tightfall. The read-beside fix for kernel reads into title
-  memory is by **Joshua Odom** (commit `10ea38e` of the same fork family). Both
-  are carried here unchanged apart from one merge conflict.
-- This fork's changes were developed with [Claude Code](https://claude.com/claude-code).
+- [VIctory](https://github.com/Marvisak/VIctory) by Marvisak and contributors is the base project.
+- [fxceless/victory-fork](https://github.com/fxceless/victory-fork) contributed rendering work, including indexed texture rechecks.
+- [DexNom Runtime](https://github.com/DexNom/VIctory) informed the resident texture refresh behavior.
+- [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD) informed pipeline reference reuse.
+- [XCL](https://github.com/ivall/xcl) served as a behavior reference.
 
-## Status of this fork (2026-11-25)
+VIctory Omega Fork is GPL-3.0-or-later.
+
+## Merged here from the fxceless tree
+
+The branch this fork builds on keeps its own record of what was measured and
+changed, on one machine with an RTX 4070. It follows as it is there; "this
+fork" in it is fxceless/victory-gta6.
+
+### Status of the fxceless tree (2026-11-25)
 
 **Not playable yet: 2.5 to 4 frames per second, and shadowed areas are black.**
 Tested on one machine: Windows 11, Intel i7-14700KF, NVIDIA RTX 4070 12 GB,

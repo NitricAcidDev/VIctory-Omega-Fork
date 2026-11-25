@@ -1202,10 +1202,7 @@ impl State {
             // SAFETY: an open list and a live pipeline.
             unsafe { l.SetPipelineState(&p.pso) };
             self.host_pipeline = p.pso.as_raw() as usize;
-            list.used_pipeline(&p.name);
-            // The title may release the pipeline before it submits the list.
-            list.keep(&p.pso);
-            list.keep(&p.root);
+            list.keep_pipeline(&p.pso, &p.root, &p.name);
         }
         for stage in &p.stages {
             let t = stage.translated();
@@ -1960,7 +1957,7 @@ impl State {
         let mut since_asked = 0u64;
         if !room {
             HEAP_TEXTURES_FULL.fetch_add(1, Ordering::Relaxed);
-            once!("textures picked by index: the card has no room for more; they wait");
+            once!("textures picked by index: the card has no room for new allocations");
         }
         let mut refused = 0;
         // Room again: the slots held back while the card was full are due
@@ -2129,6 +2126,7 @@ impl State {
             // had its colour only in the launches that entered the world
             // under the line. `VICTORY_REUPLOAD_WHEN_FULL=0`: refused, as
             // before.
+            let mut _resident = None;
             if !room {
                 let has_its_texture = reupload_when_full()
                     && heap.handle(index).is_some_and(|handle| {
@@ -2150,6 +2148,13 @@ impl State {
                     }
                     continue;
                 }
+                // Held until the list has recorded its use: nothing may let
+                // it go in between (NitricAcidDev, after DexNom).
+                _resident = heap
+                    .handle(index)
+                    .and_then(crate::descriptor::view)
+                    .as_ref()
+                    .and_then(crate::descriptor::host::resident_texture);
                 let n = HEAP_TEXTURES_REUPLOADED_FULL.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 || n.is_multiple_of(500) {
                     tracing::info!(

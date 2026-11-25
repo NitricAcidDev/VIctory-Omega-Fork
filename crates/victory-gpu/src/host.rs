@@ -1904,13 +1904,11 @@ void main(uint3 group : SV_GroupID, uint t : SV_GroupIndex) {
 
 /// Whether the pieces hashed again after ranges were sent up to a copy in
 /// the card's memory are hashed in runs of pieces that touch, each piece
-/// once (`VICTORY_CARD_REHASH_RUNS=1`; off by default), and not in a pass
+/// once (disable with `VICTORY_CARD_REHASH_RUNS=0`), and not in a pass
 /// per range sent up.
 ///
 /// These passes are ours, they run on the card before every submission's
-/// lists, and no timing so far names them: each walks its 64 KiB pieces
-/// 16 bytes at a time, 4,096 steps one after the other, so a pass takes
-/// the time of one piece however few its pieces are. Run 102 sent up 514
+/// lists, and repeated passes add dispatch overhead even when they hash very few pieces. Run 102 sent up 514
 /// ranges a frame: 514 such passes. The same pieces are hashed either way;
 /// a piece hashed when it need not be, or not hashed when it should, costs
 /// a fetch that finds nothing and loses no shader write.
@@ -1924,9 +1922,9 @@ fn rehash_runs() -> bool {
     /// 0 off, 1 on, 2 in turn.
     static MODE: OnceLock<u8> = OnceLock::new();
     match *MODE.get_or_init(|| match std::env::var("VICTORY_CARD_REHASH_RUNS").as_deref() {
-        Ok("1") => 1,
+        Ok("0") => 0,
         Ok("alt") => 2,
-        _ => 0,
+        _ => 1,
     }) {
         0 => false,
         1 => true,
@@ -2034,6 +2032,8 @@ struct Deferred {
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
+    /// Each pipeline and its root signature, kept once per recording.
+    bound_pipelines: std::collections::HashMap<usize, (ID3D12PipelineState, ID3D12RootSignature)>,
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
@@ -2424,9 +2424,39 @@ fn note_beside(noted: &mut std::collections::HashMap<(usize, u32), u64>, fetched
     fetched.len() as u64
 }
 
+/// Coalesce adjacent readback pieces when the source and destination both
+/// continue the preceding copy. CPU merging still uses the original pieces.
+fn readback_runs<T: PartialEq>(
+    pieces: impl IntoIterator<Item = (T, usize, usize, u64)>,
+    mut copy: impl FnMut(T, usize, usize, u64),
+) {
+    let mut pieces = pieces.into_iter();
+    let Some((mut source, mut start, mut end, mut destination)) = pieces.next() else {
+        return;
+    };
+    for (next_source, next_start, next_end, next_destination) in pieces {
+        if source == next_source && end == next_start && destination + (end - start) as u64 == next_destination {
+            end = next_end;
+        } else {
+            copy(source, start, end, destination);
+            (source, start, end, destination) = (next_source, next_start, next_end, next_destination);
+        }
+    }
+    copy(source, start, end, destination);
+}
+
 #[cfg(test)]
 mod relay_tests {
-    use super::{fetched_beside, flagged_pieces, landable, note_beside};
+    use super::{fetched_beside, flagged_pieces, landable, note_beside, readback_runs};
+
+    #[test]
+    fn readback_runs_require_contiguous_source_and_destination() {
+        let pieces = [(1, 4, 8, 0), (1, 8, 12, 4), (1, 16, 20, 8), (1, 20, 24, 20), (2, 24, 28, 24)];
+        let mut runs = Vec::new();
+        readback_runs(pieces, |source, start, end, destination| runs.push((source, start, end, destination)));
+        assert_eq!(runs, [(1, 4, 12, 0), (1, 16, 20, 8), (1, 20, 24, 20), (2, 24, 28, 24)]);
+    }
+
 
     /// A piece fetched on the copy queue while a later flight was in the
     /// air is fetched again by that flight, and by no flight sent after
@@ -4766,9 +4796,10 @@ impl Host {
                     // title's either way.
                     let after = second.order_done();
                     let copy = second.down.list()?;
-                    for (shadow, lo, hi, at) in &pieces {
-                        copy.1.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
-                    }
+                    readback_runs(
+                        pieces.iter().map(|(shadow, lo, hi, at)| (&shadow.buffer, *lo, *hi, *at)),
+                        |source, lo, hi, at| copy.1.CopyBufferRegion(&buffer, at, source, lo as u64, (hi - lo) as u64),
+                    );
                     let job = second.down.send(copy, &[(&self.fence, behind)], total)?;
                     second.down.wait(job, event)?;
                     if beside {
@@ -4786,9 +4817,10 @@ impl Host {
                 }
                 allocator.Reset()?;
                 list.Reset(&allocator, None)?;
-                for (shadow, lo, hi, at) in &pieces {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
-                }
+                readback_runs(
+                    pieces.iter().map(|(shadow, lo, hi, at)| (&shadow.buffer, *lo, *hi, *at)),
+                    |source, lo, hi, at| list.CopyBufferRegion(&buffer, at, source, lo as u64, (hi - lo) as u64),
+                );
                 list.Close()?;
                 let lists = [Some(list.cast::<ID3D12CommandList>()?)];
                 // In the order of the queue: the sends of title bytes so
@@ -5181,9 +5213,10 @@ impl Host {
                     // relay uses, in the plainest run there is.
                     if let Some(second) = crate::queue2::second().filter(|s| s.fetches()) {
                         let copy = second.down.list()?;
-                        for &(i, lo, hi, at) in &pieces {
-                            copy.1.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
-                        }
+                        readback_runs(
+                            pieces.iter().map(|&(i, lo, hi, at)| (&plan.ranges[i].shadow.buffer, lo, hi, at)),
+                            |source, lo, hi, at| copy.1.CopyBufferRegion(fetched, at, source, lo as u64, (hi - lo) as u64),
+                        );
                         let job = second.down.send(copy, &[(&self.fence, *submitted)], total)?;
                         let was_working = working(false);
                         second.down.wait(job, self.event)?;
@@ -5194,9 +5227,10 @@ impl Host {
                     }
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
-                    for &(i, lo, hi, at) in &pieces {
-                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
-                    }
+                    readback_runs(
+                        pieces.iter().map(|&(i, lo, hi, at)| (&plan.ranges[i].shadow.buffer, lo, hi, at)),
+                        |source, lo, hi, at| list.CopyBufferRegion(fetched, at, source, lo as u64, (hi - lo) as u64),
+                    );
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
                     self.card_sent();
@@ -6693,6 +6727,7 @@ impl HostList {
             if !(deferred.copies.is_empty()
                 && deferred.uploads.is_empty()
                 && deferred.kept.is_empty()
+                && deferred.bound_pipelines.is_empty()
                 && deferred.textures.is_empty()
                 && deferred.writes.is_empty()
                 && deferred.backs.is_empty())
@@ -6704,8 +6739,26 @@ impl HostList {
             && self.twins.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
+    /// Holds a pipeline the list binds until the list is reset (the title
+    /// may release it before it submits the list), once for each, and notes
+    /// it. From NitricAcidDev, after Belobug: kept at every bind, a frame of
+    /// some 5,000 binds took and gave back 10,000 references.
+    pub(crate) fn keep_pipeline(&self, pso: &ID3D12PipelineState, root: &ID3D12RootSignature, name: &str) {
+        let new = match self.deferred().bound_pipelines.entry(pso.as_raw() as usize) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((pso.clone(), root.clone()));
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(_) => false,
+        };
+        // (The meter of pipelines counts every bind.)
+        if new || crate::cardmeter::pipelines() {
+            self.used_pipeline(name);
+        }
+    }
+
     /// Notes a pipeline the list binds; called where it is bound.
-    pub(crate) fn used_pipeline(&self, name: &str) {
+    fn used_pipeline(&self, name: &str) {
         {
             let mut pipelines = self.pipelines.lock().unwrap_or_else(|e| e.into_inner());
             if !pipelines.contains(name) {
@@ -8045,7 +8098,7 @@ impl Meter {
             if passes + compares > 0.0 {
                 tracing::info!(
                     "our passes over copies in the card's memory per frame: {passes:.0} hash passes over {pieces:.0} pieces after \
-                     ranges were sent up (VICTORY_CARD_REHASH_RUNS=1 joins them: now {}), {compares:.0} compare passes",
+                     ranges were sent up (batched rehash: {}), {compares:.0} compare passes",
                     if rehash_runs() { "on" } else { "off" }
                 );
             }
@@ -8352,7 +8405,11 @@ impl Host {
                 .then(|| crate::capture::read_back(&self.device, list, texture))
                 .flatten();
             #[cfg(feature = "diagnostics")]
-            let probe = if slot.is_some() { None } else { crate::capture::probe(&self.device, list, texture) };
+            let probe = if slot.is_none() && (!crate::capture::manual_only() || read_now) {
+                crate::capture::probe(&self.device, list, texture)
+            } else {
+                None
+            };
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             list.ResourceBarrier(&[

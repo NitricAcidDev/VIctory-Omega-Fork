@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$env:VICTORY_BVH_BUILDER = '0'
 $containerRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = if ($CheckoutPath) { $CheckoutPath } else { $PSScriptRoot }
 $lastUsedFile = Join-Path $containerRoot 'data\last-game-executable.txt'

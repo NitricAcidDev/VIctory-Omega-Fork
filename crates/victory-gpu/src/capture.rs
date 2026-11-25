@@ -177,6 +177,12 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     }
 }
 
+/// The normal launcher keeps captures available without automatic readbacks.
+pub(crate) fn manual_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CAPTURE_MANUAL_ONLY").is_some_and(|v| v == "1"))
+}
+
 /// Whether frame `n` is saved.
 pub(crate) fn wanted(n: u64) -> bool {
     // Before the world, with `VICTORY_CAPTURE_WORLD`: every 16th frame too
@@ -187,7 +193,7 @@ pub(crate) fn wanted(n: u64) -> bool {
     // run, so single frames cannot be compared between runs).
     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
     let in_world = world_on() && first != u64::MAX && n > first && (n - first).is_multiple_of(world_every());
-    folder().is_some() && (n.is_power_of_two() || listed(n) || before_world || in_world)
+    folder().is_some() && ((!manual_only() && n.is_power_of_two()) || listed(n) || before_world || in_world)
 }
 
 /// Saves 8-bit RGBA or BGRA rows (`pitch` bytes apart) as frame `n`.

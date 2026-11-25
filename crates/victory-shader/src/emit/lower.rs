@@ -5881,7 +5881,21 @@ impl<'a> Lower<'a> {
                 .filter(|(s, b)| *s != site && *b == a && same(*s))
                 .find_map(|(s, _)| use_of(*s))
         };
-        let use_at = use_of(site).or_else(twin);
+        // The data-only load can cover fewer (or more) dwords than the
+        // descriptor load. A fixed table address identifies the same
+        // descriptor when the other load uses it from its first dword.
+        let fixed_prefix = || {
+            let address = address.filter(|a| a.dynamic.is_none())?;
+            let root = x.native.layout.get(address.param)?;
+            if root.root != RootType::Table {
+                return None;
+            }
+            x.res.scalar.iter()
+                .filter(|(s, a)| *s != site && *a == address)
+                .filter_map(|(s, _)| use_of(*s))
+                .find(|(_, first)| *first == 0)
+        };
+        let use_at = use_of(site).or_else(twin).or_else(fixed_prefix);
         // A descriptor nothing uses as one, whose size the code reads all the same (a
         // texture picked from the heap by an index in a constant buffer, its width and
         // height turned into a texel size; a buffer tested for being empty by its record

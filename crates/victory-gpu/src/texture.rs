@@ -1502,15 +1502,18 @@ fn recheck_mips() -> bool {
 }
 
 /// A fingerprint of the title memory `[at, at + len)`, never 0: of all of
-/// it up to 48 KiB, else of 16 KiB at its start, its middle and its end,
-/// and of the ranges `mips` (offsets from `at`, bytes; see
-/// [`staged_memory`]). A texture streams in whole mips, and the three
-/// windows alone see only the smallest mips and mip 0 of a plain texture,
-/// and only two slices of an array or cube map: a mip or slice that
-/// arrived after the upload elsewhere was not seen. Read through the
-/// kernel, so pages not there count as zeros.
+/// it up to 48 KiB, else of twelve windows of 4 KiB spread over it
+/// (NitricAcidDev; they were three of 16 KiB, at its start, its middle and
+/// its end), and of the ranges `mips` (offsets from `at`, bytes; see
+/// [`staged_memory`]). A texture streams in whole mips, and windows alone
+/// see some mips of a plain texture and some slices of an array or cube
+/// map: a mip, slice or block that arrived after the upload elsewhere was
+/// not seen. Read through the kernel, so pages not there count as zeros.
+/// What each way sees of what changes: `two_ways_to_look_at_a_texture`.
 pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
-    const WINDOW: usize = 16 << 10;
+    const WINDOW: usize = 4 << 10;
+    const WINDOWS: usize = 12;
+    const BUDGET: usize = WINDOWS * WINDOW;
     thread_local! {
         static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -1519,18 +1522,20 @@ pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
     READ.with(|read| {
         let mut read = read.borrow_mut();
         let longest = mips.iter().map(|&(_, n)| n as usize).max().unwrap_or(0);
-        read.resize((3 * WINDOW).max(longest), 0);
+        read.resize(BUDGET.max(longest), 0);
         let mut take = |from: usize, bytes: usize| {
             read[..bytes].fill(0);
             crate::host::copy_mapped(read.as_mut_ptr(), (at as usize + from) as *const u8, bytes, false);
             print = crate::quick::chain(print, &read[..bytes]);
         };
-        if len <= 3 * WINDOW {
+        if len <= BUDGET {
             take(0, len);
         } else {
-            take(0, WINDOW);
-            take((len / 2) & !0xfff, WINDOW);
-            take(len - WINDOW, WINDOW);
+            let last = len - WINDOW;
+            for i in 0..WINDOWS - 1 {
+                take(i * (last / (WINDOWS - 1)), WINDOW);
+            }
+            take(last, WINDOW);
             for &(from, bytes) in mips {
                 let from = from as usize;
                 if from < len {
@@ -1874,6 +1879,55 @@ mod title_memory_tests {
         l.at.store(0, Relaxed);
         l.note();
         assert!(!l.now() && l.times.load(Relaxed) == 1);
+    }
+
+    #[test]
+    fn texture_fingerprint_spots_changes_between_the_old_sample_regions() {
+        let mut bytes = vec![0u8; 1024 * 1024];
+        let original = super::fingerprint(bytes.as_ptr() as u64, bytes.len() as u64, &[]);
+        bytes[280 * 1024] = 0x7f;
+        assert_ne!(super::fingerprint(bytes.as_ptr() as u64, bytes.len() as u64, &[]), original);
+        bytes[280 * 1024] = 0;
+        assert_eq!(super::fingerprint(bytes.as_ptr() as u64, bytes.len() as u64, &[]), original);
+    }
+
+    /// Of every 64 KiB block and every 4 KiB page of some textures, changed
+    /// alone: how many each way of looking sees (`--ignored --nocapture`).
+    #[test]
+    #[ignore = "a comparison, not a check"]
+    fn two_ways_to_look_at_a_texture() {
+        use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
+        let whole = |len: usize, windows: &[(usize, usize)], at: usize, n: usize| windows.iter().any(|&(a, b)| a < at + n && at < (a + b).min(len));
+        for (name, size, mips) in [("512 square BC7", 512, 10), ("1024 square BC7", 1024, 11), ("2048 square BC7", 2048, 12), ("4096 square BC7", 4096, 13)] {
+            let desc = Desc {
+                dimension: Dimension::Tex2d,
+                width: size,
+                height: size,
+                depth: 1,
+                mips,
+                element_bytes: 16,
+                block: 4,
+                samples: 1,
+                swizzle: Swizzle::SW_64KB_S,
+            };
+            let layout = Layout::new(&desc).unwrap();
+            let len = layout.size as usize;
+            let last = len - 4096;
+            let twelve: Vec<(usize, usize)> = (0..12).map(|i| (if i == 11 { last } else { i * (last / 11) }, 4096)).collect();
+            let three = vec![(0, 16384), ((len / 2) & !0xfff, 16384), (len - 16384, 16384)];
+            let ranges: Vec<(usize, usize)> = super::look_ranges(&layout).into_iter().map(|(a, b)| (a as usize, b as usize)).collect();
+            let of = |windows: &[(usize, usize)], step: usize| {
+                let n = len / step;
+                let seen = (0..n).filter(|i| whole(len, windows, i * step, step)).count();
+                format!("{seen} of {n}")
+            };
+            let ours: Vec<_> = three.iter().chain(&ranges).copied().collect();
+            let both: Vec<_> = twelve.iter().chain(&ranges).copied().collect();
+            for (way, windows) in [("twelve windows (primary)", &twelve), ("three windows, levels, blocks (before)", &ours), ("twelve, levels, blocks (now)", &both)] {
+                let read: usize = windows.iter().map(|w| w.1).sum();
+                println!("{name}: {way}: blocks {}, pages {}, {} KiB read", of(windows, 65536), of(windows, 4096), read / 1024);
+            }
+        }
     }
 
     /// Title memory whose tail is reserved and not committed reads through
@@ -2441,7 +2495,7 @@ mod look_tests {
                 memory[bytes].copy_from_slice(&before);
             }
             assert_eq!(fingerprint(at, layout.size, &ranges), whole);
-            assert!(missed > blocks / 2, "the mips' starts alone missed {missed} of {blocks}");
+            assert!(layout.desc.mips == 1 || missed > blocks / 2, "the mips' starts alone missed {missed} of {blocks}");
         }
     }
 

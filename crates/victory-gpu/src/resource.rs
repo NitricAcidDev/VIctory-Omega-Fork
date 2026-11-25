@@ -2085,6 +2085,22 @@ pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
     hosted(this, true).map(|made| made.0)
 }
 
+/// Hold an existing host allocation without creating one under memory pressure.
+#[cfg(windows)]
+pub(crate) fn resident_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
+    if this.is_null() {
+        return None;
+    }
+    hosted(this, false).map(|made| made.0)
+}
+
+/// Find a placed texture without creating a resource for it.
+#[cfg(windows)]
+pub(crate) fn existing_placed_texture(address: u64, desc: &[u32; 14]) -> Option<This> {
+    let map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    map.get(&(address, *desc)).map(|&resource| resource as This)
+}
+
 /// A host texture like the title's: same description, in GPU memory,
 /// without the console's layout and flags.
 #[cfg(windows)]

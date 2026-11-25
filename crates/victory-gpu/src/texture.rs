@@ -1353,18 +1353,66 @@ pub(crate) fn unstage(resource: This) {
     }
 }
 
-/// Where a staged title texture's memory is: address and bytes.
-pub(crate) fn staged_memory(resource: This) -> Option<(u64, u64)> {
+/// Where a staged title texture's memory is: address and bytes, and the
+/// ranges of it (offsets from the address, bytes) that [`fingerprint`]
+/// reads besides its three windows: the start of every mip of every slice
+/// ([`victory_formats::texture::Layout::sample_ranges`]) and a part of
+/// every 64 KiB block ([`victory_formats::texture::Layout::block_ranges`]).
+/// None with `VICTORY_HEAP_RECHECK_MIPS=0`: the three windows alone, as
+/// before.
+pub(crate) fn staged_memory(resource: This) -> Option<(u64, u64, Option<std::sync::Arc<[(u64, u64)]>>)> {
     let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
-    let (at, len) = map.as_ref()?.get(&(resource as usize))?.memory();
-    Some((at as u64, len as u64))
+    let staging = map.as_ref()?.get(&(resource as usize))?;
+    let (at, len) = staging.memory();
+    let mips = recheck_mips().then(|| look_ranges(&staging.layout).into());
+    Some((at as u64, len as u64, mips))
+}
+
+/// Bytes [`fingerprint`] reads at the start of each mip, and the most mips
+/// it reads of one texture (spread over its slices and mips when it has
+/// more). A 4096-square texture with all its mips: 10 reads, 12 KiB; a cube
+/// map with 10 mips: 40 reads, 52 KiB.
+const MIP_WINDOW: u64 = 1 << 10;
+const MIP_RANGES: usize = 64;
+
+/// The same of the texture's 64 KiB blocks: one read of 512 bytes in each, up
+/// to 16 MiB of texture in full.
+const BLOCK_WINDOW: u64 = 512;
+const BLOCK_RANGES: usize = 256;
+
+/// The ranges of a texture's memory a look at it reads, in order.
+fn look_ranges(layout: &victory_formats::texture::Layout) -> Vec<(u64, u64)> {
+    let mut ranges = layout.sample_ranges(MIP_WINDOW, MIP_RANGES);
+    ranges.extend(layout.block_ranges(BLOCK_WINDOW, BLOCK_RANGES));
+    ranges.sort_unstable();
+    // Those that overlap or touch, joined (`dedup_by` passes the later one
+    // first).
+    ranges.dedup_by(|next, kept| {
+        let joins = next.0 <= kept.0 + kept.1;
+        if joins {
+            kept.1 = kept.1.max(next.0 + next.1 - kept.0);
+        }
+        joins
+    });
+    ranges
+}
+
+/// Whether [`fingerprint`] also reads [`look_ranges`]
+/// (`VICTORY_HEAP_RECHECK_MIPS=0`: no).
+fn recheck_mips() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_RECHECK_MIPS").is_none_or(|v| v != "0"))
 }
 
 /// A fingerprint of the title memory `[at, at + len)`, never 0: of all of
-/// it up to 48 KiB, else of 16 KiB at its start, its middle and its end
-/// (a texture streams in whole mips; the small ones lie first). Read
-/// through the kernel, so pages not there count as zeros.
-pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
+/// it up to 48 KiB, else of 16 KiB at its start, its middle and its end,
+/// and of the ranges `mips` (offsets from `at`, bytes; see
+/// [`staged_memory`]). A texture streams in whole mips, and the three
+/// windows alone see only the smallest mips and mip 0 of a plain texture,
+/// and only two slices of an array or cube map: a mip or slice that
+/// arrived after the upload elsewhere was not seen. Read through the
+/// kernel, so pages not there count as zeros.
+pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
     const WINDOW: usize = 16 << 10;
     thread_local! {
         static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1373,7 +1421,8 @@ pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
     let mut hasher = blake3::Hasher::new();
     READ.with(|read| {
         let mut read = read.borrow_mut();
-        read.resize(3 * WINDOW, 0);
+        let longest = mips.iter().map(|&(_, n)| n as usize).max().unwrap_or(0);
+        read.resize((3 * WINDOW).max(longest), 0);
         let mut take = |from: usize, bytes: usize| {
             read[..bytes].fill(0);
             crate::host::copy_mapped(read.as_mut_ptr(), (at as usize + from) as *const u8, bytes, false);
@@ -1385,6 +1434,12 @@ pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
             take(0, WINDOW);
             take((len / 2) & !0xfff, WINDOW);
             take(len - WINDOW, WINDOW);
+            for &(from, bytes) in mips {
+                let from = from as usize;
+                if from < len {
+                    take(from, (bytes as usize).min(len - from));
+                }
+            }
         }
     });
     let hash = hasher.finalize();
@@ -2085,5 +2140,81 @@ mod pool_tests {
         all(&second).fill(7);
         second.no_leftovers();
         assert_eq!(all(&second)[bytes as usize - 1], 7);
+    }
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::*;
+    use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
+
+    fn bc7(side: u32, mips: u32) -> Layout {
+        Layout::new(&Desc {
+            dimension: Dimension::Tex2d,
+            width: side,
+            height: side,
+            depth: 1,
+            mips,
+            element_bytes: 16,
+            block: 4,
+            samples: 1,
+            swizzle: Swizzle::SW_64KB_D,
+        })
+        .unwrap()
+    }
+
+    /// A 64 KiB block that arrives after the others, anywhere in a texture,
+    /// changes its fingerprint. The three windows alone, and the starts of
+    /// its mips, miss most of them: the block of another texture stays on
+    /// screen as a square.
+    #[test]
+    fn a_block_that_arrives_last_is_seen() {
+        for layout in [bc7(2048, 12), bc7(1024, 1)] {
+            let mut memory: Vec<u8> = (0..layout.size).map(|i| (i * 31 >> 9) as u8).collect();
+            let at = memory.as_ptr() as u64;
+            let ranges = look_ranges(&layout);
+            let starts = layout.sample_ranges(MIP_WINDOW, MIP_RANGES);
+            let [whole, some] = [&ranges, &starts].map(|r| fingerprint(at, layout.size, r));
+            let blocks = layout.size.div_ceil(BLOCK) as usize;
+            let mut missed = 0;
+            for block in 0..blocks {
+                let bytes = block << 16..((block + 1) << 16).min(memory.len());
+                let before = memory[bytes.clone()].to_vec();
+                memory[bytes.clone()].iter_mut().for_each(|b| *b ^= 0xff);
+                assert_ne!(fingerprint(at, layout.size, &ranges), whole, "block {block}");
+                missed += usize::from(fingerprint(at, layout.size, &starts) == some);
+                memory[bytes].copy_from_slice(&before);
+            }
+            assert_eq!(fingerprint(at, layout.size, &ranges), whole);
+            assert!(missed > blocks / 2, "the mips' starts alone missed {missed} of {blocks}");
+        }
+    }
+
+    const BLOCK: u64 = 64 << 10;
+
+    /// What a look costs, by the texture's size.
+    #[test]
+    #[ignore = "a measurement: run it by name with --ignored --nocapture"]
+    fn look_costs() {
+        for (side, mips) in [(256, 1), (512, 10), (1024, 11), (2048, 12), (4096, 13)] {
+            let layout = bc7(side, mips);
+            let memory: Vec<u8> = (0..layout.size).map(|i| (i * 31 >> 9) as u8).collect();
+            let at = memory.as_ptr() as u64;
+            let ranges = look_ranges(&layout);
+            let time = |ranges: &[(u64, u64)]| {
+                let started = std::time::Instant::now();
+                for _ in 0..200 {
+                    std::hint::black_box(fingerprint(at, layout.size, ranges));
+                }
+                started.elapsed().as_micros() as f64 / 200.0
+            };
+            eprintln!(
+                "{side}x{side} BC7, {} KiB: {:.0} us with {} ranges, {:.0} us with the windows alone",
+                layout.size >> 10,
+                time(&ranges),
+                ranges.len(),
+                time(&[])
+            );
+        }
     }
 }

@@ -365,8 +365,8 @@ impl Spans {
 /// [`REMAPPED`] so that what such writes do is counted by itself.
 static PAGE_WRITTEN: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
-/// Since the start: such ranges kept for a pass; ranges dropped because no
-/// pass took them; slots of placed textures that held bytes of them when a
+/// Since the start: such ranges kept for a pass; ranges joined to others
+/// before a pass took them; slots of placed textures that held bytes of them when a
 /// pass took them; of those, the slots whose texture had been uploaded
 /// before the write (out of the queue, or in it after an upload): they are
 /// the ones that kept the bytes from before, and the ones made due when
@@ -375,9 +375,14 @@ pub(crate) static PAGE_WRITES: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 /// Frames from the pass that takes a written range to the look at its
-/// slots: the levels of one texture arrive in a few requests, and a look
-/// two frames on takes those of the next frame with it.
-const PAGE_WRITE_AFTER: u64 = 2;
+/// slots: the levels and blocks of one texture arrive in many requests, and
+/// a look three frames after the last takes them together
+/// ([`TextureQueue::filled`]).
+const PAGE_WRITE_AFTER: u64 = 3;
+
+/// Frames from the first such write to the look at the latest, however long
+/// more of them come.
+const PAGE_WRITE_MOST: u64 = 24;
 
 /// The bytes of a write the guards do not see are in title memory `[at,
 /// at + len)`: the placed textures there changed with no descriptor
@@ -401,8 +406,11 @@ pub(crate) fn page_written(at: usize, len: usize) {
         return;
     }
     if ranges.len() >= MOST {
-        PAGE_WRITES[1].fetch_add(ranges.len() as u64, Relaxed);
-        ranges.clear();
+        // No write is forgotten: nothing else may ever look at what it
+        // changed. Nearby textures are looked at too.
+        let before = ranges.len();
+        compact_remapped_ranges(&mut ranges);
+        PAGE_WRITES[1].fetch_add((before - ranges.len()) as u64, Relaxed);
     }
     ranges.push((start, end));
 }
@@ -518,7 +526,7 @@ fn tabled_out() -> bool {
 }
 
 /// What the queue of textures picked by index knows of a title slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Waiting {
     /// The frame from which the slot is due.
     due: u64,
@@ -538,7 +546,17 @@ struct Waiting {
     /// the fingerprint it had at the upload, how many looks found it
     /// unchanged, and the frame of the upload. A fingerprint of 0: none.
     checked: (u64, u64, u64, u8, u64),
+    /// The ranges of its memory the fingerprint reads at the start of its
+    /// mips (`crate::texture::staged_memory`), with `checked`.
+    mips: Option<Mips>,
+    /// The frame, plus one, of the first write of a run of writes that came
+    /// after its upload and were not looked at yet ([`TextureQueue::filled`]);
+    /// 0: none.
+    filled: u64,
 }
+
+/// Ranges of a texture's memory (offsets, bytes) read for its fingerprint.
+pub(crate) type Mips = std::sync::Arc<[(u64, u64)]>;
 
 /// The queue of title slots whose texture view waits to be brought up to
 /// date for shaders that pick textures by index: which are due, and in
@@ -564,7 +582,7 @@ impl TextureQueue {
         }
         self.writes += 1;
         let write = self.writes;
-        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0) });
+        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0), mips: None, filled: 0 });
     }
 
     fn remove(&mut self, index: u32) {
@@ -632,6 +650,7 @@ impl TextureQueue {
         if let Some(w) = self.same(index, write) {
             w.due = frame + (1u64 << w.looks.min(16)).min(most.max(1));
             w.looks = w.looks.saturating_add(1);
+            w.filled = 0;
         }
     }
 
@@ -670,7 +689,7 @@ impl TextureQueue {
     /// not all of it: looked at again from frame `due`.
     fn partly(&mut self, index: u32, write: u64, due: u64, mapped: u64) {
         if let Some(w) = self.same(index, write) {
-            (w.due, w.looks, w.mapped) = (due, 0, mapped.max(1));
+            (w.due, w.looks, w.mapped, w.filled) = (due, 0, mapped.max(1), 0);
         }
     }
 
@@ -678,18 +697,20 @@ impl TextureQueue {
     /// with fingerprint `print`: looked at again from frame `due`, for a
     /// title that fills a texture's memory after it wrote the view (the
     /// `looks`-th such look; `uploaded` is the upload's frame).
+    /// `mips`: the ranges the fingerprint read besides its windows.
     #[allow(clippy::too_many_arguments)]
-    fn recheck(&mut self, index: u32, write: u64, due: u64, at: (u64, u64), print: u64, looks: u8, uploaded: u64) {
+    fn recheck(&mut self, index: u32, write: u64, due: u64, at: (u64, u64), mips: Option<Mips>, print: u64, looks: u8, uploaded: u64) {
         if let Some(w) = self.same(index, write) {
-            (w.due, w.looks, w.mapped) = (due, 1, 0);
+            (w.due, w.looks, w.mapped, w.filled) = (due, 1, 0, 0);
             w.checked = (at.0, at.1, print, looks, uploaded);
+            w.mips = mips;
         }
     }
 
     /// What [`TextureQueue::recheck`] noted of slot `index`, if it is
     /// waiting for such a look.
-    fn checked(&self, index: u32) -> Option<(u64, u64, u64, u8, u64)> {
-        self.slots.get(&index).map(|w| w.checked).filter(|c| c.2 != 0)
+    fn checked(&self, index: u32) -> Option<((u64, u64, u64, u8, u64), Option<Mips>)> {
+        self.slots.get(&index).filter(|w| w.checked.2 != 0).map(|w| (w.checked, w.mips.clone()))
     }
 
     /// The memory slot `index`'s texture lies in was mapped, unmapped or
@@ -700,7 +721,40 @@ impl TextureQueue {
         self.writes += 1;
         let write = self.writes;
         let due = self.slots.get(&index).map_or(due, |w| w.due.min(due));
-        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0) });
+        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0), mips: None, filled: 0 });
+    }
+
+    /// Bytes of slot `index`'s texture arrived in `frame` after an upload of
+    /// it: a read of the title's has finished, with no descriptor written
+    /// and nothing mapped. Looked at [`PAGE_WRITE_AFTER`] frames after the
+    /// last of such a run of writes, [`PAGE_WRITE_MOST`] after the first at
+    /// the latest: the blocks of one texture arrive in many requests, and
+    /// each look that finds it changed uploads all of it. What is known of
+    /// the last upload is kept, so a look that finds the same bytes uploads
+    /// nothing; the looks after it begin anew. It takes its turn among the
+    /// slots not uploaded yet.
+    fn filled(&mut self, index: u32, frame: u64) {
+        self.writes += 1;
+        let write = self.writes;
+        let due = frame + PAGE_WRITE_AFTER;
+        let w = self.slots.entry(index).or_insert(Waiting {
+            due,
+            written: frame,
+            write,
+            looks: 0,
+            mapped: 0,
+            checked: (0, 0, 0, 0, 0),
+            mips: None,
+            filled: 0,
+        });
+        // The first write of the run, unless its look is over.
+        let first = if w.filled == 0 { frame } else { w.filled - 1 };
+        w.filled = first + 1;
+        w.due = due.min(first + PAGE_WRITE_MOST);
+        // A pass at work on it took the bytes from before: what it does
+        // with it is not this write's.
+        (w.write, w.written) = (write, frame);
+        (w.looks, w.mapped, w.checked.3) = (0, 0, 0);
     }
 
     /// Bytes of slot `index`'s memory that were mapped at its last upload
@@ -1187,16 +1241,17 @@ impl HostHeap {
         write: u64,
         due: u64,
         at: (u64, u64),
+        mips: Option<Mips>,
         print: u64,
         looks: u8,
         uploaded: u64,
     ) {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
-        textures.recheck(index, write, due, at, print, looks, uploaded);
+        textures.recheck(index, write, due, at, mips, print, looks, uploaded);
     }
 
     /// See [`TextureQueue::checked`].
-    pub(crate) fn texture_slot_checked(&self, index: u32) -> Option<(u64, u64, u64, u8, u64)> {
+    pub(crate) fn texture_slot_checked(&self, index: u32) -> Option<((u64, u64, u64, u8, u64), Option<Mips>)> {
         self.textures.lock().unwrap_or_else(|e| e.into_inner()).checked(index)
     }
 
@@ -1261,7 +1316,7 @@ impl HostHeap {
     /// placed texture holds bytes of them ([`Spans::slots_holding`]). A
     /// slot whose texture was uploaded before the write shows the bytes
     /// from before: with `VICTORY_PAGE_WRITES` (`crate::watch::page_writes`,
-    /// bit 2) it is due again [`PAGE_WRITE_AFTER`] frames on, as memory
+    /// bit 2) it is due again ([`TextureQueue::filled`]), as memory
     /// mapped under it would make it ([`HostHeap::texture_slots_remapped`]);
     /// its host copy exists, so the upload needs no room on the card. A
     /// slot still waiting for its first upload is left as it is: that
@@ -1299,7 +1354,7 @@ impl HostHeap {
             return [held, slots.len(), 0];
         }
         for &slot in &slots {
-            textures.changed(slot, frame, frame + PAGE_WRITE_AFTER);
+            textures.filled(slot, frame);
         }
         [held, slots.len(), slots.len()]
     }
@@ -3769,7 +3824,7 @@ mod tests {
 
     /// A write behind the guards' back under a placed texture: a slot
     /// waiting for its first upload is left alone, one uploaded before is
-    /// counted, and made due two frames on when that is asked for. (The
+    /// counted, and made due a few frames on when that is asked for. (The
     /// ranges are handed over here, not through the list all heaps share.)
     #[test]
     fn a_page_write_makes_an_uploaded_texture_slot_due_when_asked() {
@@ -3795,10 +3850,65 @@ mod tests {
         // Under it, counted only: it stays out of the queue.
         assert_eq!(heap.slots_written_under(&written, 60, false), [1, 1, 0]);
         assert_eq!(slots(u64::MAX), []);
-        // Under it, asked for: due two frames on, not before.
+        // Under it, asked for: due a few frames on, not before.
         assert_eq!(heap.slots_written_under(&written, 60, true), [1, 1, 1]);
-        assert_eq!(slots(61), []);
-        assert_eq!(slots(62), [1]);
+        assert_eq!(slots(60 + PAGE_WRITE_AFTER - 1), []);
+        assert_eq!(slots(60 + PAGE_WRITE_AFTER), [1]);
+    }
+
+    /// Writes that go on under an uploaded texture put its look off until
+    /// they stop, but not for longer than [`PAGE_WRITE_MOST`]; the look
+    /// keeps what is known of the upload, so one that finds the same bytes
+    /// uploads nothing; a pass at work on the slot while a write comes does
+    /// not take the slot out.
+    #[test]
+    fn writes_after_an_upload_are_one_look_after_the_last() {
+        let mut q = TextureQueue::default();
+        let due = |q: &TextureQueue, at: u64| q.due(at, 8).into_iter().map(|d| d.0).collect::<Vec<_>>();
+        q.written(7, 1, 1, false);
+        let write = q.due(1, 1)[0].1;
+        let mips: Mips = vec![(0, 64)].into();
+        q.recheck(7, write, 50, (0x1000, 0x2000), Some(mips.clone()), 99, 3, 1);
+        // A run of writes, a frame apart.
+        q.filled(7, 10);
+        q.filled(7, 11);
+        q.filled(7, 12);
+        assert_eq!(due(&q, 12 + PAGE_WRITE_AFTER - 1), []);
+        assert_eq!(due(&q, 12 + PAGE_WRITE_AFTER), [7]);
+        // Known still, and its looks begin anew.
+        assert_eq!(q.checked(7), Some(((0x1000, 0x2000, 99, 0, 1), Some(mips.clone()))));
+        // They never stop: looked at all the same.
+        for frame in 13..200 {
+            q.filled(7, frame);
+        }
+        assert_eq!(due(&q, 10 + PAGE_WRITE_MOST - 1), []);
+        assert_eq!(due(&q, 10 + PAGE_WRITE_MOST), [7]);
+        // The look is over: the next run is counted from its own start.
+        let write = q.due(u64::MAX, 1)[0].1;
+        q.recheck(7, write, 300, (0x1000, 0x2000), Some(mips), 99, 1, 1);
+        q.filled(7, 250);
+        assert_eq!(due(&q, 249 + PAGE_WRITE_AFTER), []);
+        assert_eq!(due(&q, 250 + PAGE_WRITE_AFTER), [7]);
+        // The pass found it as it was, and for the last time; a write came
+        // before it said so.
+        let write = q.due(u64::MAX, 1)[0].1;
+        q.filled(7, 260);
+        q.done(7, write);
+        assert_eq!(due(&q, 260 + PAGE_WRITE_AFTER), [7]);
+        // Uploaded in part: taken again although no more of it is mapped.
+        let write = q.due(u64::MAX, 1)[0].1;
+        q.partly(7, write, 270, 0x8000);
+        assert_eq!(q.mapped(7), 0x8000);
+        q.filled(7, 271);
+        assert_eq!((q.mapped(7), due(&q, 271 + PAGE_WRITE_AFTER)), (0, vec![7]));
+        // Out of the queue: back in it, with nothing known, so uploaded.
+        let write = q.due(u64::MAX, 1)[0].1;
+        q.done(7, write);
+        q.filled(7, 400);
+        assert_eq!((due(&q, 400 + PAGE_WRITE_AFTER), q.checked(7)), (vec![7], None));
+        // It takes its turn with those not uploaded yet, not ahead of them.
+        q.written(1, 401, 401, false);
+        assert_eq!(due(&q, 410)[0], 1, "the newest write first");
     }
 
     /// `VICTORY_STALE_TEXTURES=0`: nothing is ever stale, and a view that

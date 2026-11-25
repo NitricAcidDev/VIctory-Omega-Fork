@@ -788,22 +788,30 @@ pub fn writing(at: usize, len: usize) {
 /// copies of buffers and textures read through tables take them again);
 /// 2, the placed textures picked by index that lie under it are due again;
 /// 4, both also for reads to plain addresses when they have finished.
-/// Unset or `guards`: bit 1 alone. `0`: nothing, counted only (the default
-/// until run 199). `1`: bits 1 and 2. `slots`: bit 2 alone. `all`:
-/// everything.
-/// (Bit 1 by default: in every run 10,000 to 50,000 guarded blocks of host
-/// copies lay under such writes and kept the bytes from before; runs 197
-/// and 198 opened them, 9,766 and 10,796 blocks, with nothing worse for
-/// it. Bit 2 makes texture slots due and is the one that flooded the
-/// queue in an earlier form: still asked for by name.)
+/// Unset or `all`: everything. `0`: nothing, counted only. `guards`: bit 1
+/// alone (the default until bits 2 and 4 were coalesced). `1`: bits 1 and
+/// 2. `slots`: bit 2 alone.
+/// (Bit 1: in every run 10,000 to 50,000 guarded blocks of host copies lay
+/// under such writes and kept the bytes from before; runs 197 and 198
+/// opened them, 9,766 and 10,796 blocks, with nothing worse for it.
+/// Bit 2: a texture picked by index is uploaded when its memory is mapped,
+/// before the read into those pages has finished. Nothing else told of the
+/// bytes that came after, and the looks afterwards read a small part of
+/// them, so blocks of 64 KiB kept what the pages held before: squares of
+/// other textures or of nothing, others in every launch. It flooded the
+/// queue when every write made every slot due; now only slots uploaded
+/// before are, once for a run of writes, behind a look that uploads only
+/// what changed ([`crate::descriptor::host`], `TextureQueue::filled`).
+/// Bit 4: the same for reads to plain addresses, of which the pass was told
+/// before they began only.)
 pub(crate) fn page_writes() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("VICTORY_PAGE_WRITES").as_deref().map(str::trim) {
         Ok("0") => 0,
+        Ok("guards") => 1,
         Ok("1") => 3,
         Ok("slots") => 2,
-        Ok("all") => 7,
-        _ => 1,
+        _ => 7,
     })
 }
 

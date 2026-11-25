@@ -114,17 +114,17 @@ Lines to look for in a log:
 
 ## Ray tracing
 
-Not run here. The real fix for the black: fxceless #994 (on #854 and #993)
-has the title's structure builder running on 32-lane cards for 4 to 11
-minutes (RTX 4070, 5060 Ti, 5070 Ti, 5090), at 88 ms more a frame on an RTX
-5090 and 2 to 5 times the frame on others, and on this branch's base. A merge
-into this tree has 37 conflicts and is under way in a local folder. Needs
-#911's cap on constant buffer views, or the device goes.
+A build of its own (branch `ray-tracing-test`, local; not on `primary`):
+fxceless #994 with #854 and #993 merged into this tree, so that the title's
+own structure builder runs. Its tests pass here; not run with the title. How
+to build, start and read it: [AGENT.md](AGENT.md), section 6. Others measured
+88 ms more a frame on an RTX 5090, 2 to 5 times the frame on smaller cards.
+The stand-in light stays on until the builder runs.
 
 ## Next
 
 1. A run of this build, then the lines above.
-2. The ray tracing merge, as a build of its own.
+2. A run of the ray tracing build, with the rays on and off.
 3. Upstream `cd94d35` + `940d32f`: copy-backs compare only what shaders
    marked (365 MB compared a frame for 2 MB, fxceless #650).
 4. Device slots `0x1c8` and `0x218`, pipeline creation that is not written:

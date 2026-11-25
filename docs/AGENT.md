@@ -21,7 +21,8 @@ said "just do it, you have permission".
 3. Take anything better from other repositories and their issues and pull
    requests (list in section 7), compare it with what is here feature by
    feature, keep the better, say why.
-4. Ray tracing: they want to try it. A build and a `.bat` for it.
+4. Ray tracing: they want to try it. A build and a `.bat` for it (made,
+   section 6).
 5. A test `.bat` that loads everything without being limited by the card's
    memory (section 5, item 1).
 6. Work goes on **`primary`** now, not on `secondary-test`. Push there when
@@ -59,7 +60,7 @@ said "just do it, you have permission".
 | Launchers | `runtime\build\Launch VIctory*.bat`, outside Git |
 | Logs | `%LOCALAPPDATA%\victory-nitric\logs\launch-*.log` (strip the colour codes) |
 | Settings and caches | `%LOCALAPPDATA%\victory-nitric` (`light.txt` tunes the stand-in light live) |
-| Ray tracing merge, half done | `runtime\build\victory-rt-test` (a git worktree, section 6) |
+| Ray tracing build | `runtime\build\victory-rt-test` (a git worktree, section 6) |
 
 Machine: RTX 5080 16 GB (32-lane waves), 24 logical processors, 64 GB,
 Windows 11.
@@ -79,8 +80,8 @@ F="--locked --offline -j 14"
 "$CARGO" build --profile diag -p victory --features diagnostics,blake3/pure $F
 ```
 
-Last full run: GPU 255, shader 256, others 194 passed, policy 204 files ok
-(`primary` after `4237574`). A change in `victory-shader` (not in `*_tests.rs`) makes
+Last full run of `primary`: GPU 256 (`4d52524`), shader 256, others 194 passed,
+policy ok. A change in `victory-shader` (not in `*_tests.rs`) makes
 the first start translate every shader again.
 
 After any merge, look at what it **removes**, not only at conflicts: the last
@@ -110,7 +111,7 @@ git diff -U0 OLD NEW -- crates | grep '^-[^-]'
    `level by level`, `in use`, `waiting` (card memory); `heap buffers` in the
    frame line (was 27 to 117 ms); `host pipeline refused`; `fps`. Compare with
    the numbers in the handoff.
-3. **Ray tracing build** (section 6).
+3. **Ray tracing build** (section 6): made, waits for the owner's run.
 4. **Frame rate.** A 220 ms frame is about 70 ms preparing, 120 ms on the
    card, 37 ms copying back. Leads: `Launch VIctory (fast, experimental).bat`
    (fxceless' run-253 switches, 97 to 104 ms elsewhere); upstream `cd94d35` +
@@ -129,41 +130,42 @@ git diff -U0 OLD NEW -- crates | grep '^-[^-]'
    `CARD_COMPARE_WIDE`, primary's 64-thread tree fold from `ccf29aa`
    `host.rs`) with timestamps, keep the fastest.
 
-## 6. The ray tracing merge
+## 6. The ray tracing build
 
-Goal: an exe of its own in which the title's structure builder runs, with a
-launcher that sets `VICTORY_BVH_BUILDER=1` (the stand-in light turns itself
-off then). fxceless #994 (`fx/pr-994`, stacked on #854 and #993) is the one:
-it ran 4 to 11 minutes on an RTX 4070, 5060 Ti, 5070 Ti and 5090. Cost: from
-88 ms a frame (5090) to several times the frame.
+Done as a build of its own, not on `primary`: branch `ray-tracing-test`
+(local, `ff82795`, on top of `primary` `4d52524`), worktree
+`runtime\build\victory-rt-test`, exe `target-rt\diag\victory.exe`. It is
+fxceless #994 (`fx/pr-994`, stacked on #854 and #993) merged into this tree;
+what was kept of each side is in the commit's message. Tests on the RTX 5080:
+translator 309, host 257, others pass. **Not run with the title yet.**
 
-`victory-rt-test` is a worktree at `04cf7b6` with `git merge fx/pr-994` begun.
-Resolved and not to be done again: `README.md` (ours), `descriptor/host.rs`,
-`draw.rs`, `host.rs`, `list.rs`, `pipeline.rs`, `pipeline/host.rs`,
-`shader_cache.rs`, `bitcode/opt.rs`, `emit/host.rs`, `emit/mod.rs`,
-`emit/shader.rs`, `ir.rs`, `wave64_tests.rs`, and `indirect.rs` (ours, whole:
-our split dispatch stays, theirs with `SPLIT_DISPATCH` and `split_signature`
-is out).
+Launchers: `(ray tracing test)` sets `VICTORY_BVH_BUILDER=1`;
+`(ray tracing build, rays off)` is the same exe without it, in which the seven
+compute programs the card's driver refuses run in the paired form. Both use
+their own cache (`cache-ray-tracing`) and a copy of the saves
+(`data-ray-tracing`), made once.
 
-Left: `crates/victory-shader/src/emit/lower.rs`, six conflicts:
+To build it: `. victory-env.sh` **changes into the main checkout**, so go back
+and set the target folder after it, or the wrong tree is compiled and tested:
 
-1. `group_id`: one function, adding `USER_GROUP_BASE`, left out when
-   `c != 0 || stage != Cs || self.user_first() != 0 || named > 40`.
-2. `descriptor_data`: theirs moved it to `emit/descriptor_data.rs`. Take their
-   file and put our five changes into it: `fixed_prefix`; buffers always raw
-   (`(11 | u, 0)`); scalar loads of SRV **or UAV**; `view_bias` taken off the
-   record count; `slot_stride` dividing it.
-3. `scalar_dynamic(value)` (ours) with their `helper_own` for helper lanes.
-4. Exports: both our `nan_guard` line and their `sig` line.
-5. `edge(b, taken, false)` / `edge(b, not_taken, taken == not_taken)` (ours:
-   an edge has a third part) with their loop notes; pass it in `note_exit`.
-6. Tests: keep `#[path = "lower_tests.rs"] mod tests;`, put their three new
-   tests there (`lower_cs`, the group base test, the waterfall test).
+```bash
+. "../victory-env.sh"
+cd "../victory-rt-test"
+export CARGO_TARGET_DIR="$(cygpath -m "$PWD")/target-rt"
+```
 
-Codes: `USER_GROUP_BASE` 0x105, `USER_STRUCTURES` 0x106, `USER_THREAD_LIMIT`
-0x107. Then `git add -A`, compile, all tests, commit, merge `primary` in. Check
-that a constant buffer view is cut to 64 KiB (#911): without it the device goes
-35 s after the builder starts. First test run with `VICTORY_BVH_QUARANTINE=1`.
+Lines to read in its log: `the ray-tracing structure builder runs: all of its
+programs have host pipelines` (or `stays off: not all of ...` with how many
+are missing), `ray-tracing structure builder is turned off` and why, `no host
+pipeline for dispatches by thread counts`, device lost. Others had it run 4 to
+11 minutes on an RTX 4070, 5060 Ti, 5070 Ti and 5090, at 88 ms more a frame
+(5090) to several times the frame; it wants much shared memory (a PC with
+16 GB ran out). If the title stops: once with `VICTORY_BVH_QUARANTINE=1`
+(#1013 makes it hold), then `VICTORY_BVH_TRACE=<file>`.
+
+If the pictures are better than the stand-in light at a frame rate the owner
+accepts, or the paired form alone (rays off) is worth its card time: merge the
+branch into `primary`.
 
 ## 7. Where the good fixes come from
 

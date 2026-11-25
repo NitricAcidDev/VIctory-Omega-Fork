@@ -814,6 +814,16 @@ impl TextureQueue {
     }
 }
 
+/// The largest constant buffer view D3D12 takes (4,096 elements of 16
+/// bytes). One of more is invalid and removes an NVIDIA device; a shader
+/// reads the first 64 KiB only (fxceless/victory-gta6 pull request #799).
+const MOST_CONSTANTS: u32 = 65_536;
+
+/// The host size of a constant buffer view of `size` bytes.
+fn cbv_size(size: u32) -> u32 {
+    size.min(MOST_CONSTANTS).next_multiple_of(256)
+}
+
 /// Whether `view` is of a texture the title may fill itself: a texture it
 /// placed in memory, or a texture object.
 pub(crate) fn is_texture_view(view: &View) -> bool {
@@ -1934,7 +1944,7 @@ impl HostHeap {
         let Some(host) = host() else { return };
         let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
             BufferLocation: gpu,
-            SizeInBytes: size.next_multiple_of(256),
+            SizeInBytes: cbv_size(size),
         };
         // SAFETY: a slot of our heap; the memory is the caller's.
         unsafe {
@@ -2994,7 +3004,7 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             }
             let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
                 BufferLocation: gpu,
-                SizeInBytes: size.next_multiple_of(256),
+                SizeInBytes: cbv_size(size),
             };
             // SAFETY: a slot of our heap; the range lies in the host copy.
             unsafe { device.CreateConstantBufferView(Some(&desc), at) };
@@ -4244,6 +4254,11 @@ mod tests {
     /// The tests that take what [`remapped`] noted (one list for all heaps).
     static REMAP_TESTS: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn constant_views_are_whole_and_no_more_than_the_host_takes() {
+        assert_eq!([0, 1, 256, 257, 65_535, 65_536, 65_537, u32::MAX].map(cbv_size), [0, 256, 256, 512, 65_536, 65_536, 65_536, 65_536]);
+    }
+
     /// Memory that changes under a texture a table showed lately is looked
     /// at: after the grace frames, if no draw reads the slot through a
     /// table again, which brings it up to date.
@@ -4284,7 +4299,7 @@ mod tests {
         let all = || heap.failed.lock().unwrap().get(&3).copied();
         let (key, due, tries) = all().unwrap();
         assert_eq!((key, tries), (7, 1));
-        assert!(due >= crate::frame::current() + 1 && !heap.failed_due(3, 7));
+        assert!(due > crate::frame::current() && !heap.failed_due(3, 7));
         heap.failed.lock().unwrap().insert(3, (7, 0, 1));
         assert!(heap.failed_due(3, 7), "its time has come");
         assert!(!heap.failed_due(3, 8), "another record");

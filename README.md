@@ -503,6 +503,11 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 | `VICTORY_PAGE_WRITES=guards` | what the storage layer writes under a texture already uploaded is not uploaded again (unset is `all`) |
 | `VICTORY_HEAP_RECHECK_MIPS=0` | a look at an uploaded texture reads three places of it, not every mip and block |
 | `VICTORY_FILL_ON_CARD=0` | constants a running submission writes are filled on the processor, after waiting for it |
+| `VICTORY_LIVELY_TEXTURES=0` | a texture whose memory keeps changing (a movie, what is laid over a cutscene) is treated as any other: a change no guard saw is found every eighth frame and shown by the next list |
+| `VICTORY_INTRO_UPLOADS=0` | the same until the first 3D frame: without the uploads at every list that ended the intro's flicker |
+| `VICTORY_NAN_GUARD=0` | a NaN or an infinity a pixel program exports goes into the colour target as it is (a bad pixel then stays in what the title blends into every frame); `stores`: typed stores are guarded too |
+| `VICTORY_WAVE_WIDE_ONLY=<hash>,...` | the compute programs that may take the wave-wide form on a 32-lane card (default: particle visibility; `all`: the water's light and the tiling of the reflections too; `none`) |
+| `VICTORY_CARD_HASH_WIDE=0` | the compare of copies in the card's memory hashes a piece with one thread, not 64 |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
 

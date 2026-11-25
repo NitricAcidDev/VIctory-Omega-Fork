@@ -252,3 +252,22 @@ fn helper_lanes_leave_a_waterfall_loop_with_their_own_value() {
     words.extend([0xF800_180F, 0x0706_0504, 0xBF81_0000]); // exp mrt0 v4..v7 done vm
     check(&words, |x, _| [x as f32 + 1.0, x as f32, (x ^ 1) as f32, x as f32]);
 }
+
+/// What a pixel program exports to a colour target is a number: NaN as 0,
+/// an infinity as the largest half float, anything else as it is.
+#[test]
+fn a_colour_target_gets_no_nan_and_no_infinity() {
+    let mut words = computed();
+    words.extend([
+        0x7E0A_02FF,
+        0x7FC0_0000, // v_mov_b32 v5, NaN
+        0x7E0C_02FF,
+        0x7F80_0000, // v_mov_b32 v6, inf
+        0x7E0E_02FF,
+        0xFF80_0000, // v_mov_b32 v7, -inf
+        0xF800_180F,
+        0x0706_0504, // exp mrt0 v4..v7 done vm
+        0xBF81_0000,
+    ]);
+    check(&words, |x, y| [value(x, y), 0.0, 65504.0, -65504.0]);
+}

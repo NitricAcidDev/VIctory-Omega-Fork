@@ -2331,8 +2331,23 @@ fn copy_source(inst: &Inst, k: usize) -> Option<Moved> {
     if inst.name() == "s_movk_i32" {
         return Some(Moved::Const(i32::from((*imm)? as i16) as u32));
     }
+    // s_bfm_b32 d, width, offset: `width` ones from bit `offset` (the
+    // console's compiler builds sampler words this way; pull request #799
+    // of fxceless/victory-gta6).
+    if inst.name() == "s_bfm_b32" {
+        let constant = |o: &Operand| match *o {
+            Operand::Const(c) => inline(c),
+            Operand::Literal(x) => Some(x),
+            _ => None,
+        };
+        let width = constant(src.first()?)? & 31;
+        let offset = constant(src.get(1)?)? & 31;
+        return Some(Moved::Const(((1u32 << width) - 1) << offset));
+    }
     let src = src.first()?;
     match (inst.name(), *src) {
+        // A literal of a 64-bit move that is no number is zero-extended.
+        ("s_mov_b64", Operand::Literal(x)) => Some(Moved::Const(if k == 0 { x } else { 0 })),
         ("s_mov_b32" | "s_mov_b64", Operand::Scalar { code, .. }) if code != NULL => {
             inst.read(Reg::S(code + k as u8)).map(Moved::Value)
         }

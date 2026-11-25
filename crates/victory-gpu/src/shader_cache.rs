@@ -84,6 +84,13 @@ fn build() -> [u8; 32] {
     }
     h.update(&victory_shader::emit::translation_fingerprint());
     h.update(include_bytes!("shader_cache.rs"));
+    // The list this file reads for the translator (`translate_listed`): the
+    // shader crate's fingerprint does not see it.
+    h.update(b"VICTORY_WAVE_WIDE_ONLY=");
+    if let Some(value) = std::env::var_os("VICTORY_WAVE_WIDE_ONLY") {
+        h.update(value.as_encoded_bytes());
+    }
+    h.update(b"\0");
     *h.finalize().as_bytes()
 }
 
@@ -96,7 +103,7 @@ pub fn warm(container: &[u8]) -> Result<bool, String> {
     let ran = AtomicBool::new(false);
     let translate = |c: &[u8]| {
         ran.store(true, Ordering::Relaxed);
-        victory_shader::emit::translate(c).map_err(|e| e.to_string())
+        translate_listed(c)
     };
     cached(cache, &build(), container, translate).map(|_| ran.load(Ordering::Relaxed))
 }
@@ -104,10 +111,49 @@ pub fn warm(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    let translate = translate_listed;
     match CACHE.get() {
         Some(cache) => cached(cache, &build(), container, translate),
         None => translate(container),
+    }
+}
+
+/// A container translated with the form this file allows it by its hash
+/// ([`WAVE_WIDE_DEFAULT`]); for runs and the offline warm-up alike, which
+/// share the cache.
+fn translate_listed(c: &[u8]) -> Result<HostShader, String> {
+    static LIST: OnceLock<Vec<String>> = OnceLock::new();
+    let hash = blake3::hash(c).to_hex();
+    let list = LIST.get_or_init(|| listed(std::env::var("VICTORY_WAVE_WIDE_ONLY").ok().as_deref()));
+    let wide = list.iter().any(|h| hash.starts_with(h.as_str()));
+    victory_shader::emit::with_wave_wide(wide, || victory_shader::emit::translate(c)).map_err(|e| e.to_string())
+}
+
+/// The containers (by the 16-digit hash the log names shaders with) whose
+/// wave64 compute program may take the wave-wide form on a host of 32-lane
+/// waves (`victory_shader::emit::with_wave_wide`): the driver refuses its
+/// 64-lane form, so that its dispatches were dropped in every frame
+/// (particle visibility). One of the four of fxceless/victory-gta6 pull
+/// request #823, 15 minutes on an RTX 5070.
+///
+/// `VICTORY_WAVE_WIDE_ONLY=all` adds the other three: the two of the
+/// water's light (another tester's frames gained black blocks when they
+/// ran, in another form of them: #799) and the tiling of the screen-space
+/// reflections, with which a band of blocks along the bottom of the prison
+/// shots goes (#823), but two passes it feeds trace rays through a structure
+/// nothing builds and darken the room (an RTX 5080, issue #512; the two held
+/// back, it stayed lit: `VICTORY_SKIP_PIPELINES`). A list of hashes replaces
+/// these, `none` allows none.
+const WAVE_WIDE_DEFAULT: [&str; 1] = ["369cbe906ea72764"];
+const WAVE_WIDE_MORE: [&str; 3] = ["5dc3b25986622949", "6f225b641c5b0708", REFLECTION_TILING];
+const REFLECTION_TILING: &str = "2cc4c197ee29e291";
+
+/// The hashes `VICTORY_WAVE_WIDE_ONLY` names.
+fn listed(value: Option<&str>) -> Vec<String> {
+    match value.map(str::trim) {
+        None | Some("") => WAVE_WIDE_DEFAULT.iter().map(|h| h.to_string()).collect(),
+        Some("all") => WAVE_WIDE_DEFAULT.iter().chain(&WAVE_WIDE_MORE).map(|h| h.to_string()).collect(),
+        Some(v) => v.split(',').map(|h| h.trim().to_lowercase()).filter(|h| h.len() >= 8 && h != "none").collect(),
     }
 }
 
@@ -351,6 +397,17 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<HostShader> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_of_wave_wide_programs_is_the_default_all_none_or_the_hashes_given() {
+        assert_eq!(listed(None), WAVE_WIDE_DEFAULT);
+        assert_eq!(listed(Some(" ")), WAVE_WIDE_DEFAULT);
+        assert_eq!(listed(Some("all")).len(), 4);
+        assert!(listed(Some("all")).iter().any(|h| h == REFLECTION_TILING));
+        assert!(listed(Some("none")).is_empty());
+        // Too short to be a hash: nothing (an empty entry would name all).
+        assert_eq!(listed(Some("2CC4C197EE29E291,,ab")), ["2cc4c197ee29e291"]);
+    }
 
     fn shader() -> HostShader {
         HostShader {

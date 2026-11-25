@@ -1,13 +1,13 @@
 # Merging `secondary-test`: notes for the agent that does it
 
-Written 2026-11-24 for the Codex agent working on `primary`. Everything here
-is AI-assisted. Numbers come from synthetic programs, unit benchmarks and the
+Written 25 November 2026 for whoever works on `primary`. Everything here is
+AI-assisted. Numbers come from synthetic programs, unit benchmarks and the
 timing lines of local runs; nothing of the game is quoted.
 
 ## What to do
 
-`secondary-test` is `primary` (`4800f0d`) plus the commits below, so
-`primary` takes it as a fast-forward:
+`secondary-test` contains `primary` (`fb89116`), so `primary` takes it as a
+fast-forward:
 
 ```powershell
 git fetch origin
@@ -25,9 +25,32 @@ Check after any merge that these are still there:
 | `fn cut(` and both calls of it | `crates/victory-hle/src/modules/xmem.rs` |
 | `title_memory_reading(at, len)` (two arguments) | `crates/victory-gpu/src/watch.rs` |
 | `SLOT_BIASES` bound and dropped on when unset | `crates/victory-gpu/src/draw.rs`, `pipeline/host.rs` |
-| `translator_id` in the shader cache's key | `crates/victory-gpu/src/shader_cache.rs` |
+| `translation_fingerprint` with the switches found by `build.rs` | `crates/victory-shader/src/emit/mod.rs` |
+| `fn filled(` and its call in `slots_written_under` | `crates/victory-gpu/src/descriptor/host.rs` |
+| `fn gamma_pair(` | the same |
+| `crate::placed::create` | `crates/victory-gpu/src/resource.rs` |
+| `fn group_id(` and `fn group_base(` | `lower.rs`, `draw.rs` |
+| `rest` in the clamp's source | `crates/victory-gpu/src/indirect.rs` |
 
-## Changes, and what each rests on
+A new `VICTORY_*` switch the translator reads joins the shader cache's key by
+itself. Files named `*_tests.rs` in `victory-shader` do not change it.
+
+## New here against `primary`
+
+See the tables of [the handoff](HANDOFF-secondary-test.md). In one line each:
+
+| Change | Here | `primary` (`fb89116`) |
+|--------|------|-----------------------|
+| fxceless tree | `9376fd6` | `c96b4f2` |
+| sRGB and linear views of one texture | kept, seven formats | read in the texture's own |
+| Data that arrives after an upload | uploaded | kept as it was, but for 48 KiB looked at (`f42cea6`) |
+| Compute records over 65,535 groups | run whole | cut |
+| Unfilled indirect records | free | spend the list's budget |
+| Host textures | in shared heaps | one by one |
+| Texture fingerprint | 33 GB/s | BLAKE3, 5.3 GB/s |
+| Bake passes | bounded for the run | 1.5 s a frame |
+
+## Earlier changes of this branch, all still in
 
 | Change | Before | After | Evidence |
 |--------|--------|-------|----------|

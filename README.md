@@ -101,7 +101,7 @@ Memory sync between the title's memory and the copies on the card:
 - Writes of the storage layer into physical pages are counted where the title
   has those pages mapped (10,000 to 50,000 guarded blocks of copies lay under
   them in every run) and can open the guards there:
-  `VICTORY_PAGE_WRITES=guards` (off by default; `1`, `slots`, `all` do more).
+  `VICTORY_PAGE_WRITES=guards` (here `all` by default: see the table of variables).
 - Failed page-destination reads are retried (`VICTORY_DSTORAGE_RETRIES=0` = as before).
 
 Card memory (the test card is full from the first frame of the world: 85 to
@@ -296,7 +296,13 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 | `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `VICTORY_PIPELINE_WORKERS=<n>` | how many threads make pipelines (two thirds of the logical processors, at most 16, when unset) |
-| `VICTORY_STAGING_POOL_MB=<n>` | how much texture staging memory is kept for reuse (512; 0 keeps none) |
+| `VICTORY_STAGING_POOL_MB=<n>` | how much texture staging memory is kept for reuse (a 32nd of the machine's memory, 512 to 2048, when unset; 0 keeps none) |
+| `VICTORY_PLACED_TEXTURES=0` | textures the title fills are made one by one, not in heaps they share |
+| `VICTORY_PLACED_WASTE_MB=<n>` | how much of those heaps may be unused before textures are made one by one again (a twentieth of the card's budget, 128 to 768, when unset) |
+| `VICTORY_WIDE_TEXTURES=0` | a submission's texture checks run one after another |
+| `VICTORY_PAGE_WRITES=guards` | what the storage layer writes under a texture already uploaded is not uploaded again (unset is `all`) |
+| `VICTORY_HEAP_RECHECK_MIPS=0` | a look at an uploaded texture reads three places of it, not every mip and block |
+| `VICTORY_FILL_ON_CARD=0` | constants a running submission writes are filled on the processor, after waiting for it |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
 

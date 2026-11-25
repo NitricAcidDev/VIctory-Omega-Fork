@@ -100,6 +100,15 @@ pub const USER_VIEW_BIAS: u32 = 0x103;
 /// past that runs as a second dispatch, whose groups are numbered on from
 /// where the first ended. 0 for every other dispatch.
 pub const USER_GROUP_BASE: u32 = 0x105;
+/// `RootType::Other` code of a user-data dword the host computes, read by
+/// a program with a ray-tracing node test (`image_bvh_intersect_ray`,
+/// `image_bvh64_intersect_ray`): not 0 while the title's structures have
+/// been built (its structure builder runs). While 0, every node test
+/// answers no hit without reading the node: a box node enters no child,
+/// any other node is a triangle missed. The title's passes run whether or
+/// not anything built the structures, and would otherwise walk whatever
+/// bytes lie where they would be.
+pub const USER_STRUCTURES: u32 = 0x106;
 
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {

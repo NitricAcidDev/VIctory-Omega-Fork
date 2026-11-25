@@ -105,6 +105,8 @@ mod bias_tests;
 #[cfg(all(test, windows))]
 mod group_tests;
 #[cfg(all(test, windows))]
+mod quad_tests;
+#[cfg(all(test, windows))]
 mod wave64_tests;
 mod wave;
 

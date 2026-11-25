@@ -2110,7 +2110,18 @@ fn host_texture_as(
         ..Default::default()
     };
     let mut texture: Option<ID3D12Resource> = None;
-    let made = if reserved {
+    // A texture the title fills: in a heap with others, if it is one that
+    // can be (`crate::placed`).
+    let host_state = D3D12_RESOURCE_STATES(crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32);
+    if !reserved && clear_value.is_none() && fills(&d) {
+        // SAFETY: the description has the host layout (checked size, same
+        // fields).
+        let described = unsafe { (&raw const d).cast::<D3D12_RESOURCE_DESC>().read() };
+        texture = crate::placed::create(&host.device, &described, host_state);
+    }
+    let made = if texture.is_some() {
+        Ok(())
+    } else if reserved {
         // The card's own layout of 64 KiB tiles, which a reserved texture
         // must have.
         d.layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE.0 as u32;
@@ -2118,9 +2129,7 @@ fn host_texture_as(
         unsafe {
             host.device.CreateReservedResource(
                 (&raw const d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
+                host_state,
                 None,
                 &mut texture,
             )
@@ -2133,9 +2142,7 @@ fn host_texture_as(
                 &heap,
                 D3D12_HEAP_FLAG_NONE,
                 (&raw const d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
+                host_state,
                 // The same layout: format, then color or depth and stencil.
                 clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
                 &mut texture,

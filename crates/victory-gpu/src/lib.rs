@@ -37,8 +37,12 @@ pub mod list;
 pub mod object;
 pub mod pipeline;
 #[cfg(windows)]
+mod placed;
+#[cfg(windows)]
 mod primitive;
 pub mod query;
+#[cfg(windows)]
+mod quick;
 pub mod queue;
 pub mod resource;
 pub mod root;

@@ -73,13 +73,17 @@ pub(crate) struct Staging {
     /// recorded again about a second later if the card has room by then
     /// ([`upload`]).
     waiting: std::sync::atomic::AtomicU64,
+    /// No one finds the staging buffer any more (`unstage`): the lists that
+    /// recorded a copy from it are its last use, so what it was detiled from
+    /// need not be known afterwards.
+    parting: std::sync::atomic::AtomicBool,
 }
 
 /// What a texture's staging buffer holds: the hash of the memory detiled
 /// (memory not watched), or the write-watch asking it was detiled after.
 #[derive(Default)]
 struct Last {
-    hash: Option<blake3::Hash>,
+    hash: Option<[u64; 2]>,
     asked: u64,
     /// The frame a partly mapped texture was last read in.
     partial: Option<u64>,
@@ -496,16 +500,22 @@ struct Spare {
 /// Staging buffers taken from [`SPARE`], and made.
 static POOLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 
-/// The most bytes kept while nothing uses them.
+/// The most bytes kept while nothing uses them: a 32nd of the machine's
+/// memory, between 512 MiB and 2 GiB (a pass that catches up stages 576 MiB a
+/// frame, and a few frames are under way at once).
 fn spare_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MOST.get_or_init(|| {
-        let mb = std::env::var("VICTORY_STAGING_POOL_MB")
+        let set = std::env::var("VICTORY_STAGING_POOL_MB")
             .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(512);
-        mb << 20
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        set.map_or_else(|| pool_bytes(crate::host::total_ram()), |mb| mb << 20)
     })
+}
+
+/// [`spare_most`] on a machine with `ram` bytes of memory (0: not known).
+fn pool_bytes(ram: u64) -> u64 {
+    (ram / 32).clamp(512 << 20, 2 << 30)
 }
 
 /// The bytes a staging buffer for `bytes` has: 64 KiB (the host's
@@ -1049,6 +1059,12 @@ impl Staging {
         [self.judged[0].load(Relaxed), self.judged[1].load(Relaxed)]
     }
 
+    /// Whether the texture's host copy is made level by level
+    /// (`crate::tiles`).
+    pub(crate) fn on_demand(&self) -> bool {
+        self.on_demand
+    }
+
     /// Levels on demand: the levels that are the title's now, a bit a
     /// level. A level is held if no view starts above it, its bytes end
     /// before the next texture starts, and all of them are mapped. The
@@ -1214,11 +1230,11 @@ impl Staging {
             crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
             let changed = with_read(size, |read| {
                 crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                let hash = blake3::hash(read);
-                if last.hash == Some(hash) {
+                let hash = self.print(last, read);
+                if hash.is_some() && last.hash == hash {
                     return false;
                 }
-                last.hash = Some(hash);
+                last.hash = hash;
                 if read.iter().all(|&b| b == 0) {
                     return false;
                 }
@@ -1234,13 +1250,13 @@ impl Staging {
         }
         if through_copy() {
             return with_title(self.memory, size, |tiled| {
-                let hash = blake3::hash(tiled);
+                let hash = self.print(last, tiled);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
-                if last.hash == Some(hash) {
+                if hash.is_some() && last.hash == hash {
                     return size;
                 }
-                last.hash = Some(hash);
+                last.hash = hash;
                 self.detile(tiled);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
@@ -1250,13 +1266,13 @@ impl Staging {
         // SAFETY: committed memory of the texture's layout size, and it
         // stays committed while `_mapped` is held.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
-        let hash = blake3::hash(tiled);
+        let hash = self.print(last, tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
-        if last.hash == Some(hash) {
+        if hash.is_some() && last.hash == hash {
             return size;
         }
-        last.hash = Some(hash);
+        last.hash = hash;
         self.detile(tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
@@ -1275,9 +1291,9 @@ impl Staging {
             if !crate::host::read_into(self.memory, read) {
                 return false;
             }
-            let hash = blake3::hash(read);
-            if last.hash != Some(hash) {
-                last.hash = Some(hash);
+            let hash = self.print(last, read);
+            if hash.is_none() || last.hash != hash {
+                last.hash = hash;
                 self.detile(read);
             }
             true
@@ -1290,6 +1306,14 @@ impl Staging {
             last.asked = 0;
             0
         }
+    }
+
+    /// The print of `tiled`, the texture's memory, for telling next time
+    /// whether it changed; `None` the first time a texture whose staging
+    /// buffer is at its last use is read ([`unstage`]): nothing asks for it.
+    fn print(&self, last: &Last, tiled: &[u8]) -> Option<[u64; 2]> {
+        let parting = last.hash.is_none() && self.parting.load(std::sync::atomic::Ordering::Relaxed);
+        (!parting).then(|| crate::quick::print(tiled))
     }
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
@@ -1348,8 +1372,8 @@ impl Staging {
 /// anew.
 pub(crate) fn unstage(resource: This) {
     let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(map) = map.as_mut() {
-        map.remove(&(resource as usize));
+    if let Some(staging) = map.as_mut().and_then(|map| map.remove(&(resource as usize))) {
+        staging.parting.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1418,7 +1442,7 @@ pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
         static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let len = len as usize;
-    let mut hasher = blake3::Hasher::new();
+    let mut print = 0;
     READ.with(|read| {
         let mut read = read.borrow_mut();
         let longest = mips.iter().map(|&(_, n)| n as usize).max().unwrap_or(0);
@@ -1426,7 +1450,7 @@ pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
         let mut take = |from: usize, bytes: usize| {
             read[..bytes].fill(0);
             crate::host::copy_mapped(read.as_mut_ptr(), (at as usize + from) as *const u8, bytes, false);
-            hasher.update(&read[..bytes]);
+            print = crate::quick::chain(print, &read[..bytes]);
         };
         if len <= 3 * WINDOW {
             take(0, len);
@@ -1442,10 +1466,7 @@ pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
             }
         }
     });
-    let hash = hasher.finalize();
-    let mut first = [0u8; 8];
-    first.copy_from_slice(&hash.as_bytes()[..8]);
-    u64::from_le_bytes(first) | 1
+    print | 1
 }
 
 /// Whether a title texture has a staging buffer: a list recorded its
@@ -1705,6 +1726,7 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         detiled: std::sync::atomic::AtomicU32::new(0),
         judged: [const { std::sync::atomic::AtomicU64::new(0) }; 2],
         waiting: std::sync::atomic::AtomicU64::new(0),
+        parting: std::sync::atomic::AtomicBool::new(false),
     });
     map.insert(resource as usize, s.clone());
     add_to_address_index(&s);
@@ -2049,6 +2071,131 @@ mod cost_tests {
             }
         }
     }
+
+    /// Benchmark: the processor's part of an upload, and the host texture
+    /// committed or placed in a heap that is there already.
+    #[test]
+    #[ignore = "benchmark: run it by name with --ignored --nocapture"]
+    fn upload_parts() {
+        use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
+        let Some(host) = host() else { return };
+        for side in [256u32, 1024, 2048] {
+            let mips = side.ilog2() + 1;
+            let layout = Layout::new(&Desc {
+                dimension: Dimension::Tex2d,
+                width: side / 4,
+                height: side / 4,
+                depth: 1,
+                mips: 1,
+                element_bytes: 16,
+                block: 1,
+                samples: 1,
+                swizzle: Swizzle::SW_64KB_D,
+            })
+            .unwrap();
+            let size = layout.size as usize;
+            let tiled: Vec<u8> = (0..size).map(|i| (i * 31 >> 9) as u8).collect();
+            let pitch = (side as usize / 4 * 16).next_multiple_of(256);
+            let rows = side as usize / 4;
+            let mut plain = vec![0u8; pitch * rows];
+            let (_kept, at) = host.upload_buffer((pitch * rows) as u64).unwrap();
+            // SAFETY: the buffer's mapping.
+            let upload = unsafe { std::slice::from_raw_parts_mut(at, pitch * rows) };
+            let timed = |what: &str, f: &mut dyn FnMut()| {
+                f();
+                let started = std::time::Instant::now();
+                const N: u32 = 60;
+                for _ in 0..N {
+                    f();
+                }
+                let us = started.elapsed().as_secs_f64() * 1e6 / f64::from(N);
+                eprintln!("{side:>5} BC7 {:>5} KiB {what:<34} {us:8.1} us {:7.2} GB/s", size >> 10, size as f64 / us / 1e3);
+            };
+            timed("blake3", &mut || _ = std::hint::black_box(blake3::hash(&tiled)));
+            timed("all zero?", &mut || _ = std::hint::black_box(tiled.iter().all(|&b| b == 0)));
+            timed("detile to plain memory", &mut || layout.detile(&tiled, 0, 0, &mut plain, pitch, pitch * rows).unwrap());
+            timed("detile to upload memory", &mut || layout.detile(&tiled, 0, 0, upload, pitch, pitch * rows).unwrap());
+            timed("plain to upload memory", &mut || upload.copy_from_slice(&plain));
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                Width: u64::from(side),
+                Height: side,
+                DepthOrArraySize: 1,
+                MipLevels: mips as u16,
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_BC7_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                ..Default::default()
+            };
+            let props = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+            timed("committed texture", &mut || {
+                let mut t: Option<ID3D12Resource> = None;
+                // SAFETY: plain creation.
+                unsafe {
+                    host.device
+                        .CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut t)
+                        .unwrap()
+                };
+            });
+            // SAFETY: plain creation.
+            let (heap, info) = unsafe {
+                let info = host.device.GetResourceAllocationInfo(0, &[desc]);
+                let mut heap: Option<ID3D12Heap> = None;
+                host.device
+                    .CreateHeap(
+                        &D3D12_HEAP_DESC {
+                            SizeInBytes: 64 << 20,
+                            Properties: props,
+                            Alignment: 0,
+                            Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES,
+                        },
+                        &mut heap,
+                    )
+                    .unwrap();
+                (heap.unwrap(), info)
+            };
+            eprintln!("{side:>5} allocation {} KiB, aligned to {}", info.SizeInBytes >> 10, info.Alignment);
+            timed("placed texture", &mut || {
+                let mut t: Option<ID3D12Resource> = None;
+                // SAFETY: plain creation in a live heap with room for it.
+                unsafe {
+                    host.device
+                        .CreatePlacedResource(&heap, 0, &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut t)
+                        .unwrap()
+                };
+            });
+            timed("committed texture, kept 60", &mut {
+                let mut kept = Vec::new();
+                let device = host.device.clone();
+                move || {
+                    let mut t: Option<ID3D12Resource> = None;
+                    // SAFETY: plain creation.
+                    unsafe {
+                        device
+                            .CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut t)
+                            .unwrap()
+                    };
+                    kept.push(t);
+                }
+            });
+            timed("new 64 MiB heap", &mut || {
+                let mut heap: Option<ID3D12Heap> = None;
+                // SAFETY: plain creation.
+                unsafe {
+                    host.device
+                        .CreateHeap(
+                            &D3D12_HEAP_DESC {
+                                SizeInBytes: 64 << 20,
+                                Properties: props,
+                                Alignment: 0,
+                                Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES,
+                            },
+                            &mut heap,
+                        )
+                        .unwrap()
+                };
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2115,6 +2262,7 @@ mod pool_tests {
                     detiled: std::sync::atomic::AtomicU32::new(0),
                     judged: [const { std::sync::atomic::AtomicU64::new(0) }; 2],
                     waiting: std::sync::atomic::AtomicU64::new(0),
+                    parting: std::sync::atomic::AtomicBool::new(false),
                     used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
                 },
                 used,

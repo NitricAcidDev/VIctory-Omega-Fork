@@ -749,6 +749,13 @@ fn log_memory() {
         mb(card[0]),
         mb(card[3]),
     );
+    let [heaps, live, placed, instead] = crate::placed::counts();
+    tracing::info!(
+        "textures in shared heaps: {:.0} MB of heaps, {:.0} MB of textures in them; {placed} placed since the start, \
+         {instead} made on their own for the heaps' waste (VICTORY_PLACED_WASTE_MB)",
+        mb(heaps),
+        mb(live),
+    );
     let targets = crate::resource::targets_census();
     tracing::info!(
         "host copies the sweep never lets go: {} the host renders to or writes {:.0} MB ({} of them placed {:.0} MB);          of them {} have title memory that is not mapped now {:.0} MB, {} were not used for 30 s and are held by no          list and no slot {:.0} MB, {} are both {:.0} MB; and {} copies of textures the title fills that the host          copied into {:.0} MB",

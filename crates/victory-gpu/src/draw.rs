@@ -75,7 +75,7 @@ thread_local! {
 /// The milliseconds of every frame the pass that uploads textures picked
 /// by index takes before a shader that picks by index has asked for it
 /// (`VICTORY_EARLY_TEXTURES_MS`, 12; 0: never, as before), and the
-/// milliseconds it may take just before a draw of the title's decoration
+/// milliseconds a frame it may take just before a draw of the title's decoration
 /// bake (`VICTORY_BAKE_TEXTURES_MS`, 1500; 0: nothing special).
 ///
 /// The pass ran only from the first world frame on, where it met some
@@ -94,6 +94,46 @@ fn early_budgets() -> (u64, u64) {
         (ms("VICTORY_EARLY_TEXTURES_MS", 12), ms("VICTORY_BAKE_TEXTURES_MS", 1500))
     })
 }
+
+/// The milliseconds the passes before bake draws may take together
+/// ([`early_budgets`]): a stock to begin with, for the bakes of the loading
+/// the passes were made for, and a little for every second that passes. In
+/// the world the title bakes again and again (issue #594 of
+/// fxceless/victory-gta6: 128 bakes and more in a run, the frame rate
+/// halved and loading 50 to 110 s longer with no bound but the frame's), and
+/// there the world's own pass uploads the same textures anyway.
+struct BakeStock {
+    left: f64,
+    /// When it was last added to (`crate::host::now_ms`); 0: never asked.
+    at: u64,
+}
+
+impl BakeStock {
+    /// The most there is at once, and what a second adds.
+    const MOST_MS: f64 = 6_000.0;
+    const PER_SECOND_MS: f64 = 20.0;
+
+    const fn new() -> BakeStock {
+        BakeStock { left: Self::MOST_MS, at: 0 }
+    }
+
+    /// What a pass that begins at `now` may take, of the `asked` ms.
+    fn offer(&mut self, now: u64, asked: u64) -> u64 {
+        if self.at != 0 {
+            let passed = now.saturating_sub(self.at) as f64 / 1000.0;
+            self.left = (self.left + passed * Self::PER_SECOND_MS).min(Self::MOST_MS);
+        }
+        self.at = now.max(1);
+        asked.min(self.left.max(0.0) as u64)
+    }
+
+    /// A pass took `ms`.
+    fn took(&mut self, ms: f64) {
+        self.left -= ms;
+    }
+}
+
+static BAKE_STOCK: std::sync::Mutex<BakeStock> = std::sync::Mutex::new(BakeStock::new());
 
 /// The pixel shaders of the title's decoration bake (the title:
 /// `PS_BakeDecorations_*`), by the first 16 hex digits of their hash as the
@@ -1574,6 +1614,14 @@ impl State {
             BAKED_MS.store(0, Ordering::Relaxed);
         }
         let left = bake_ms.saturating_sub(BAKED_MS.load(Ordering::Relaxed));
+        // And within what all of them may take ([`BakeStock`]).
+        let left = if bake {
+            let offered = BAKE_STOCK.lock().unwrap_or_else(|e| e.into_inner()).offer(crate::host::now_ms(), left);
+            // (Not worth a pass.)
+            if offered < 5 { 0 } else { offered }
+        } else {
+            left
+        };
         let budget = if bake && left > 0 {
             // What a bake may read must be there now: up to 2 GiB.
             (left, 2 << 30)
@@ -1613,6 +1661,7 @@ impl State {
         PASS_BUDGET.set(None);
         if bake {
             BAKED_MS.fetch_add(began.elapsed().as_millis() as u64, Ordering::Relaxed);
+            BAKE_STOCK.lock().unwrap_or_else(|e| e.into_inner()).took(began.elapsed().as_secs_f64() * 1e3);
         }
     }
 
@@ -3615,5 +3664,35 @@ mod thread_dimension_tests {
         assert_eq!(thread_groups([0, 1, 1], [64, 1, 1]), [0, 1, 1]);
         // A program whose group is not known: as they are.
         assert_eq!(thread_groups([7, 2, 3], [0, 0, 0]), [7, 2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod bake_tests {
+    use super::BakeStock;
+
+    /// The bakes of the loading get all they ask; bakes in every frame of
+    /// the world get a fiftieth of the time; a quiet time fills the stock.
+    #[test]
+    fn bakes_cannot_take_the_frames() {
+        let mut stock = BakeStock::new();
+        // Four frames of the loading, at the most a frame may take.
+        for i in 0..4 {
+            assert_eq!(stock.offer(1000 + 2000 * i, 1500), 1500);
+            stock.took(1500.0);
+        }
+        // The world: 10 bakes a second for five minutes, each taking all it
+        // is offered (and 1 ms where it is offered nothing).
+        let mut taken = 0;
+        for i in 0..3000u64 {
+            let offered = stock.offer(10_000 + 100 * i, 1500);
+            stock.took(offered.max(1) as f64);
+            taken += offered;
+        }
+        assert!(taken <= 300 * 20 + 200, "{taken}");
+        // Nothing baked for a while: some is there again, not more than at
+        // the start.
+        assert!(stock.offer(10_000 + 300_000 + 100_000, 1500) >= 1000);
+        assert_eq!(stock.offer(100_000_000, 10_000), BakeStock::MOST_MS as u64);
     }
 }

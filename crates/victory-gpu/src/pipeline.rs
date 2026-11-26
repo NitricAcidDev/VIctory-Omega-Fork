@@ -420,8 +420,8 @@ mod light_tests {
         assert_eq!(light_of("compute", &named("ps_sky_paraboloid_reflection")), Light::None);
         assert_eq!(light_of("compute", b"CS"), Light::None);
         assert_eq!(super::program_name(&named("CS_FaceBlend_Apply")).as_deref(), Some("CS_FaceBlend_Apply_x"));
-        assert_eq!(super::program_name(b"xxCS_ab "), None);
-        assert_eq!(super::program_name(b"ABCS_Something_long "), None);
+        assert_eq!(super::program_name(b"xxCS_ab\0"), None);
+        assert_eq!(super::program_name(b"ABCS_Something_long\0"), None);
     }
 }
 

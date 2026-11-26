@@ -746,6 +746,83 @@ fn card_clock_line(frames: f64, ms: f64) {
     );
 }
 
+/// The size refreshes of host copies are cut to (`VICTORY_REFRESH_PIECE_KB`,
+/// 2,048; 0: not cut): one copy's refresh of 20 MB was one thread's work
+/// while the other threads of `crate::shadow::wide_each` waited, and the
+/// copies of a frame came to 100 MB in 13 ms on the preparing thread (RTX
+/// 5080, the prologue, 26 November).
+fn refresh_piece() -> usize {
+    static PIECE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PIECE.get_or_init(|| {
+        let kb = std::env::var("VICTORY_REFRESH_PIECE_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(2048);
+        // At least two blocks a piece, so that each is cut on a block.
+        if kb == 0 { 0 } else { (kb << 10).max(2 * REFRESH_BLOCK) }
+    })
+}
+
+/// What pieces of a refresh are cut on: the write watch's and the guards'
+/// largest unit.
+const REFRESH_BLOCK: usize = 64 << 10;
+
+/// `spans` with each longer than one and a half `piece`s cut into pieces of
+/// about `piece` bytes, on [`REFRESH_BLOCK`] boundaries (the first piece
+/// may be shorter, up to the first boundary past `piece`). Several pieces
+/// of one copy are refreshed at once already where its ranges are apart
+/// (`written_spans`); pieces are such ranges. `piece` 0: as they are.
+fn cut_spans<T: Clone>(spans: Vec<(T, usize, usize)>, piece: usize) -> Vec<(T, usize, usize)> {
+    if piece == 0 || spans.iter().all(|(_, from, to)| to - from <= piece + piece / 2) {
+        return spans;
+    }
+    let mut cut = Vec::with_capacity(spans.len() + 8);
+    for (copy, from, to) in spans {
+        if to - from <= piece + piece / 2 {
+            cut.push((copy, from, to));
+            continue;
+        }
+        let mut at = from;
+        while at < to {
+            let next = ((at + piece) / REFRESH_BLOCK * REFRESH_BLOCK).max(at + 1);
+            // No short piece at the end: the rest with the last one.
+            let next = if to.saturating_sub(next) < piece / 2 { to } else { next };
+            cut.push((copy.clone(), at, next));
+            at = next;
+        }
+    }
+    cut
+}
+
+#[cfg(test)]
+mod refresh_piece_tests {
+    use super::{REFRESH_BLOCK, cut_spans};
+
+    #[test]
+    fn pieces_cover_each_span_once_on_blocks() {
+        const MB: usize = 1 << 20;
+        let piece = 2 * MB;
+        // Small spans stay whole; the switch off leaves all whole.
+        let small = vec![(1, 100, 100 + MB), (2, 5 * MB, 8 * MB)];
+        assert_eq!(cut_spans(small.clone(), piece), small);
+        assert_eq!(cut_spans(vec![(3, 0, 64 * MB)], 0), [(3, 0, 64 * MB)]);
+        for (from, len) in [(0, 20 * MB), (12_345, 20 * MB + 777), (3 * REFRESH_BLOCK + 9, 7 * MB), (0, 3 * MB + 1)] {
+            let to = from + len;
+            let cut = cut_spans(vec![(7u8, from, to), (8, 0, 100)], piece);
+            let mine: Vec<_> = cut.iter().filter(|c| c.0 == 7).collect();
+            assert!(mine.len() >= 2, "{from} {len}: {mine:?}");
+            assert_eq!(mine.first().unwrap().1, from);
+            assert_eq!(mine.last().unwrap().2, to);
+            for w in mine.windows(2) {
+                // Next to each other, cut on a block.
+                assert_eq!(w[0].2, w[1].1);
+                assert_eq!(w[0].2 % REFRESH_BLOCK, 0);
+            }
+            for c in &mine {
+                assert!(c.2 > c.1 && c.2 - c.1 <= piece + piece / 2 + REFRESH_BLOCK, "{c:?}");
+            }
+            assert!(cut.contains(&(8, 0, 100)));
+        }
+    }
+}
+
 /// Of the preparing: title memory copies (microseconds, bytes) and texture
 /// refreshes (microseconds, bytes hashed), since the last frame-rate line.
 pub(crate) static PREPARING: [std::sync::atomic::AtomicU64; 4] = [
@@ -8019,7 +8096,22 @@ impl Batch {
         }
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
-        if !(crate::watch::light() && shadow.nothing_new(from, to - from)) {
+        let piece = refresh_piece();
+        if piece != 0 && to - from > 2 * piece {
+            // A large one on the threads (`cut_spans`), counted as the
+            // time it took, not the threads' sum.
+            let pieces = cut_spans(vec![(shadow, from, to)], piece);
+            let took = std::time::Instant::now();
+            let before = PREPARING[0].load(Ordering::Relaxed);
+            crate::shadow::wide_each(pieces.len(), move |i| {
+                let (shadow, from, to) = &pieces[i];
+                if !(crate::watch::light() && shadow.nothing_new(*from, *to - *from)) {
+                    Self::update(shadow, *from, *to);
+                }
+            });
+            let summed = PREPARING[0].load(Ordering::Relaxed).saturating_sub(before);
+            PREPARING[0].fetch_sub(summed.saturating_sub(took.elapsed().as_micros() as u64), Ordering::Relaxed);
+        } else if !(crate::watch::light() && shadow.nothing_new(from, to - from)) {
             Self::update(&shadow, from, to);
         }
         #[cfg(feature = "diagnostics")]
@@ -8116,6 +8208,8 @@ impl Batch {
             #[cfg(feature = "diagnostics")]
             FLUSHES[2].fetch_add((all - spans.len()) as u64, Ordering::Relaxed);
         }
+        // A large copy's refresh shared by the threads, not one thread's.
+        let spans = cut_spans(spans, refresh_piece());
         let ahead = spans.len() > 1;
         if ahead {
             let ranges: Vec<(usize, usize)> = spans.iter().filter(|r| r.0.asked_ahead()).map(|r| (r.1, r.2)).collect();
@@ -8177,6 +8271,7 @@ impl Batch {
         for (shadow, from, to) in &due {
             self.ahead.insert(std::sync::Arc::as_ptr(shadow) as usize, (*from, *to));
         }
+        let due = cut_spans(due, refresh_piece());
         #[cfg(feature = "diagnostics")]
         let began = std::time::Instant::now();
         let started = std::time::Instant::now();

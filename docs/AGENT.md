@@ -54,6 +54,9 @@ said "just do it, you have permission".
 7. After each round: full tests, rebuild the diagnostics exe, update the
    handoff and merge notes, push, give them a launcher to test and say in
    plain words what changed, what to look for, and what was not tested.
+8. Latest (26 November): base everything fully on **cool_fox** (also called
+   CGBJ, `codec-d/cool_fox`, taken down that day; section 5, "cool_fox")
+   and make only a few small changes where something is found wrong.
 
 ## 2. Rules that must hold
 
@@ -81,11 +84,12 @@ said "just do it, you have permission".
 | Checkout | `runtime\build\victory-render-test`, branch `primary` |
 | Build environment | `runtime\build\victory-env.sh` (Git Bash: `. victory-env.sh`, gives `$CARGO`) |
 | The exe the launchers start | `target-v2\diag\victory.exe`; the one before: `victory-25004ee.exe` |
-| Launchers | `runtime\build`, outside Git: `Launch VIctory.bat`, `(ray tracing test)`, `(safe, to compare)`. Every other one is in `runtime\build\Other launchers`, with a `README.txt` |
+| Launchers | `runtime\build`, outside Git: `Launch VIctory.bat`, `(ray tracing test)`, `(safe, to compare)`, `(7900 XTX fork)`, `(cool_fox)`. Every other one is in `runtime\build\Other launchers`, with a `README.txt` |
 | Logs | `%LOCALAPPDATA%\victory-nitric\logs\launch-*.log` (strip the colour codes) |
 | Settings and caches | `%LOCALAPPDATA%\victory-nitric` (`light.txt` tunes the stand-in light live) |
 | Ray tracing build | `runtime\build\victory-rt-test` (a git worktree, section 6) |
-| The RX 7900 XTX fork as it is | `runtime\build\victory-xtx`, branch `xtx-base` (local) at `avatarmanz/VIctory-7900XTX` `39031cb`; exe `target-xtx\diag\victory.exe`; `Launch VIctory (7900 XTX fork).bat` starts it with its `play.ps1` settings and both renderer patches, cache `cache-7900xtx`, saves copied to `data-7900xtx`, logs `xtx-*.log`. The owner asked to base the next work fully on it, with minor changes only. Its 386 GPU tests pass on the RTX 5080 |
+| The RX 7900 XTX fork as it is | `runtime\build\victory-xtx`, branch `xtx-base` (local) at `avatarmanz/VIctory-7900XTX` `39031cb`; exe `target-xtx\diag\victory.exe`; `Launch VIctory (7900 XTX fork).bat` starts it with its `play.ps1` settings and both renderer patches, cache `cache-7900xtx`, saves copied to `data-7900xtx`, logs `xtx-*.log`. Its 386 GPU tests pass on the RTX 5080. Replaced as the base by cool_fox (next row) |
+| cool_fox (CGBJ), the base now | `runtime\build\victory-coolfox`, branch `coolfox-base` (local) at `codec-d/cool_fox` `f4b48ad` plus three small changes (section 5, "cool_fox"); exe `target-cf\release\victory.exe` (`victory-unchanged.exe` beside it: `f4b48ad` alone); `Launch VIctory (cool_fox).bat` starts it with the settings of its `Play-VIctory.cmd` (Series S profile) and `VICTORY_NAN_SCRUB=1`, cache `cache-coolfox`, saves copied to `data-coolfox`, logs `coolfox-*.log`. Remote `coolfox` = `medicthewanted/cool_fox` (a mirror) |
 
 Machine: RTX 5080 16 GB (32-lane waves), 24 logical processors, 64 GB,
 Windows 11.
@@ -157,6 +161,59 @@ git diff -U0 OLD NEW -- crates | grep '^-[^-]'
 7. Race the three forms of the card's hash (`CARD_COMPARE`,
    `CARD_COMPARE_WIDE`, primary's 64-thread tree fold from `ccf29aa`
    `host.rs`) with timestamps, keep the fastest.
+
+### cool_fox (CGBJ): the base now
+
+`codec-d/cool_fox` was taken down on 26 November. Its last commit,
+`f4b48ad` (codec_d, 26 Nov 06:33 UTC, "Publish the pareto-residency
+Windows build and portable launcher"), is the head of `main` in at least
+eight copies found by searching GitHub (`DoubleGhosty`, `medicthewanted`,
+`carlm125`, `kitotake`, `AP1028`, `cputroll/cgbj-reupload`,
+`VoidOwlSoul/cgbj-backup`, `brenofrancoa/fork-cgbj`); no copy has a later
+commit by its author. It is the 7900 XTX fork at `0a43566` plus six commits
+of codec_d for NVIDIA RTX cards (an RTX 5090): the Series S two-plane
+compose, fallback heaps, a residency guard, 256 MiB DirectStorage, fence
+wakes by `WaitOnAddress`, a 32-lane form for wave64 compute programs that
+can take it, bindless refreshes scoped to their heap, and backing off when
+the card or the PC is short of memory. It lacks the 7900 XTX fork's later
+renderer patches (`VICTORY_PORT_*`). No `Cargo.toml`, `Cargo.lock` or
+`build.rs` differs from that fork. It builds offline with 1.98.1 in 39 s
+(release).
+
+Changes on `coolfox-base`, on top of `f4b48ad`:
+
+| Commit | What | From |
+|--------|------|------|
+| `c3a7d88` | Decode operandless VOP1 (`v_nop`, `v_pipeflush`, `v_clrexcp`) without a phantom literal, and VOP3 `v_cmpx` writing EXEC | Yoshi-233, `AP1028/cool_fox` branch `fix/gfx10-operand-decode` (after Belobug `4d291d4`) |
+| `7af23c9` | `VICTORY_NAN_SCRUB=1`: a NaN or infinity a pixel shader writes as a colour, or an f32 image store, becomes 0, so it cannot spread through bloom, blur and the upscaler into black blocks (seen on NVIDIA on faces and in the air). Part of the shader cache key. The launcher turns it on | `miaohaixiang1-netizen/cool-fox-12gb` `db556df` |
+| `e48274c` | Two GPU tests of the indirect clamp still expected `VICTORY_INDIRECT_REST` on; cool_fox turned it off by default (`f4b48ad`) and they failed. They now test both forms (the batch) or the run's form (the host list) | here |
+
+Tests on the RTX 5080 (`"$CARGO" test --release --locked --offline -p
+victory-shader -p victory-gpu -p victory-formats`, from the worktree with
+`CARGO_TARGET_DIR` set to its `target-cf` after sourcing `victory-env.sh`,
+which changes directory): GPU 335, shader 283, formats 41 pass. The shader
+cache in `cache-coolfox` was filled ahead with `victory shaders <game
+folder>` and the launcher's settings, so the first start translates
+little (25,756 shaders; the same 26 compute programs refused on the card).
+
+What the offline translation says (`victory translate <game> --list` with
+`VICTORY_HOST_WAVE=32 VICTORY_HOST_MAX_WAVE=32 VICTORY_NAN_SCRUB=1`, 1 min
+42 s): everything translates except 195 geometry shaders (unused), 5 ray
+traced shadow programs (`a descriptor read only as data`; ray tracing is
+off) and **26 wave64 compute programs** with `no wave32 lowering`: seven
+`GpuParticleEmit`, nine `vfx_proj_decal_trail`, three `vfx_triangleClip`
+(`6b82bc7d22016cb5`, `02384a60fda6f2d0`), five `water_shading`
+(`5dc3b25986622949`, `6f225b641c5b0708`, `926c46bab3b86bd6`) and two
+`shadowmask:CS_GenerateShadowMasks*_SampleHairScreenSpace`. The reflection
+tiling (`2cc4c197ee29e291`, primary's squares fix), particle visibility
+(`369cbe906ea72764`) and alpha resolve (`2da4beb386509b77`), all refused on
+primary, translate here. Next small change if the owner's log shows these
+dropped: primary's per-hash wave-wide list (`shader_cache.rs`
+`translate_listed`, `emit::with_wave_wide`) ported for those 26; cool_fox's
+`VICTORY_WAVE_WIDE=1` turns it on for every program, which lost the card
+before.
+
+Not run with the title. Next: read the owner's `coolfox-*.log`.
 
 ### From the RX 7900 XTX fork
 

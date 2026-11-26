@@ -5,6 +5,7 @@
 //! (unless `VICTORY_LATE_WAIT=1`, see [`late`]);
 //! overlap them with per-submission fences once more than clears run.
 
+mod awake;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -4139,6 +4140,7 @@ impl Host {
     /// behind them, and an idle stretch of the card, if one was under way,
     /// ends here ([`CARD_CLOCK_US`]).
     fn card_sent(&self) {
+        awake::sent(&self.device);
         let Some(clock) = self.card_clock() else {
             return;
         };

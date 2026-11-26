@@ -2740,8 +2740,11 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             // SAFETY: the list has run; a mapped buffer.
             let hits = unsafe { (hits_ptr as *const u32).read_volatile() };
             // The small record comes after the big ones spent the budget:
-            // it runs empty, in every round alike (none carries over).
-            assert_eq!(hits, 0, "round {round}: the spent budget empties the record after it");
+            // with REST (`VICTORY_INDIRECT_REST=1`) it runs empty, in every
+            // round alike (none carries over). Without (the default) the
+            // third big record takes nothing, so it runs in every round.
+            let ran = if rest() == 1 { 0 } else { round + 1 };
+            assert_eq!(hits, ran, "round {round}: the record after the spent budget");
         }
         // A recording with only the small record: the budget is empty
         // again, so it runs.
@@ -2759,7 +2762,8 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         list.reset();
         // SAFETY: the list has run; a mapped buffer.
         let hits = unsafe { (hits_ptr as *const u32).read_volatile() };
-        assert_eq!(hits, 1, "the budget starts empty at the next submission");
+        let ran = if rest() == 1 { 1 } else { 3 };
+        assert_eq!(hits, ran, "the budget starts empty at the next submission");
     }
 
     /// Records the dispatch records `groups` (three words each, `step`
@@ -3146,13 +3150,22 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
     }
 
     /// Records past the list's budget come out empty, and one read by many
-    /// executions is charged for each.
+    /// executions is charged for each. With `REST` (`VICTORY_INDIRECT_REST=1`)
+    /// a record that does not fit takes the rest of the budget; without it
+    /// (the default) it takes nothing.
     #[test]
     fn warp_batch_charges_every_execution() {
         let Some(mut warp) = WarpHarness::new() else {
             return;
         };
-        let pass = make_from(&warp.device, batch::SOURCE).expect("the batched clamp must compile on WARP");
+        for rest in [true, false] {
+            let source = batch::SOURCE.replace("REST ?", if rest { "true ?" } else { "false ?" });
+            warp_batch_charges(&mut warp, &source, rest);
+        }
+    }
+
+    fn warp_batch_charges(warp: &mut WarpHarness, source: &str, rest: bool) {
+        let pass = make_from(&warp.device, source).expect("the batched clamp must compile on WARP");
         const BUDGET: u32 = 1 << 27;
         // 2^26 vertices each, as much as a draw is let run: two fill it.
         for (times, records, filled) in [(1u32, 3u64, 2usize), (2, 1, 1), (1, 1, 1), (3, 1, 0)] {
@@ -3190,9 +3203,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                     (0..records as usize).map(|r| back_ptr.cast::<u32>().add(r * batch::SLOT as usize / 4).read_volatile()).collect(),
                 )
             };
-            assert_eq!(out.iter().filter(|&&v| v == 1 << 22).count(), filled, "{times} times {records}: {out:?}");
+            assert_eq!(out.iter().filter(|&&v| v == 1 << 22).count(), filled, "rest {rest}, {times} times {records}: {out:?}");
             assert!(out.iter().all(|&v| v == 0 || v == 1 << 22));
-            assert_eq!(spent, BUDGET.min((1 << 26) * times * records as u32));
+            // With REST the budget fills up; without, only what ran is charged.
+            let charged = if rest { BUDGET.min((1 << 26) * times * records as u32) } else { (1 << 26) * times * filled as u32 };
+            assert_eq!(spent, charged, "rest {rest}, {times} times {records}");
         }
     }
 

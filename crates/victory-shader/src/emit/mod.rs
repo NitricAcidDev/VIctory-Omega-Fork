@@ -79,6 +79,12 @@
 //!   geometry shader of ours between the translated vertex and pixel
 //!   shaders and draws triangle lists with the title's own vertex counts.
 //!   It binds nothing.
+//! * **Geometry shaders** ([`HwStage::Gs`], `gs_6_6`; added 2026-11-25): the
+//!   title's geometry programs, triangles in and triangle strips out, between
+//!   the container's VS program (the other compilation of the ES half the
+//!   console runs before them) and the pixel shader; user data and
+//!   descriptors as above, visible to the geometry stage. Their LDS rings are
+//!   their inputs and outputs ([`crate::geometry`], `rings.rs`).
 
 mod bitcode;
 mod container;
@@ -86,6 +92,8 @@ mod container;
 mod cube_lod_tests;
 #[cfg(all(test, windows))]
 mod diff_tests;
+#[cfg(all(test, windows))]
+mod geometry_tests;
 #[cfg(all(test, windows))]
 mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
@@ -438,12 +446,12 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
         .find(|p| {
             matches!(
                 p.stage,
-                HwStage::Vs | HwStage::Ps | HwStage::Cs | HwStage::Ms
+                HwStage::Vs | HwStage::Ps | HwStage::Cs | HwStage::Ms | HwStage::Gs
             )
         })
         .ok_or(ShaderError::Unsupported {
             offset: 0,
-            what: "a container without a vertex, pixel, compute or mesh program",
+            what: "a container without a vertex, pixel, compute, mesh or geometry program",
         })?;
     let p = crate::spill::build(&native)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
@@ -860,8 +868,7 @@ fn emit_program(
     let mut outputs = sig(FourCC::OSG1)?;
     // Interpolation as DXC declares it by default; pixel inputs that are
     // read get the mode their barycentrics say.
-    let interpolated = if pixel { &mut inputs } else { &mut outputs };
-    for e in interpolated {
+    let mode = |e: &mut container::SigElement| {
         e.interp = match (e.kind, e.comp) {
             (3, _) => 4,
             // Constant, as DXC declares it (the AMD compiler crashed on a
@@ -873,6 +880,12 @@ fn emit_program(
             (0, _) => 1,
             _ => 0,
         };
+    };
+    let interpolated = if pixel { &mut inputs } else { &mut outputs };
+    interpolated.iter_mut().for_each(mode);
+    // A geometry program's inputs are the vertex program's outputs, modes and all.
+    if native.stage == HwStage::Gs {
+        inputs.iter_mut().for_each(mode);
     }
     // (DexNom/VIctory 5f4c3df4.)
     if native.stage == HwStage::Vs
@@ -2819,6 +2832,35 @@ mod barycentric_tests {
         }
         let inputs = c.part(FourCC::ISG1).unwrap().data;
         assert_eq!((inputs[8 + 25], inputs[8 + 32 + 25]), (0, 4));
+        validate(&shader);
+    }
+
+    #[test]
+    fn a_flat_sibling_preserves_smooth_interpolation_on_a_packed_input() {
+        let [e0, e1] = exp_mrt0(2);
+        let words = [
+            0xC808_0000, // v_interp_p1_f32 v2, v0, attr0.x
+            0xC809_0001, // v_interp_p2_f32 v2, v1, attr0.x
+            e0,
+            e1,
+            0xBF81_0000,
+        ];
+        let uv = container::SigElement {
+            cols: 2,
+            ..element("TEXCOORD", 0, 0)
+        };
+        let face = container::SigElement {
+            comp: 5,
+            col: 2,
+            cols: 1,
+            ..element("SV_IsFrontFace", 13, 0)
+        };
+        let shader = pixel_with_inputs(&words, PERSP_CENTER, &[uv, face]).unwrap();
+        let dxil = Container::parse(&shader.dxil).unwrap();
+        let psv = dxil.part(FourCC::PSV0).unwrap().data;
+        assert!(psv.windows(6).any(|w| w == [1, 0, 0x42, 0, 3, 1]));
+        assert!(psv.windows(6).any(|w| w == [1, 0, 0x61, 13, 1, 1]));
+        assert!(psv.windows(2).any(|w| w == [28, 3])); // SV_Barycentrics, float
         validate(&shader);
     }
 

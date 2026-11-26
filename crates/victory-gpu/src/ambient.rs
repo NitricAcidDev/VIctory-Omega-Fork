@@ -51,6 +51,7 @@ pub(crate) enum Role {
     /// Adds the lamps' light to what the air scatters (the last program
     /// that writes that volume before it is summed up along the view).
     Air,
+    Reflections,
 }
 
 /// The program's part in this, by its name in the container.
@@ -62,6 +63,8 @@ pub(crate) fn role(container: &[u8]) -> Option<Role> {
         Some(Role::Radiance)
     } else if has(b"CS_AccumulateLocalLightInscatteringVolume") {
         Some(Role::Air)
+    } else if has(b"CS_UpdateHistory") {
+        Some(Role::Reflections)
     } else {
         None
     }
@@ -71,6 +74,7 @@ pub(crate) fn role(container: &[u8]) -> Option<Role> {
 /// and reads the scene's depth, and where the other writes the light of
 /// visible surfaces: root parameter and place in its table, in dwords.
 pub(crate) const LIGHT: (u8, u32) = (1, 176);
+pub(crate) const REFLECTIONS: (u8, u32) = (1, 40);
 pub(crate) const DEPTH: (u8, u32) = (0, 464);
 pub(crate) const RADIANCE: (u8, u32) = (1, 16);
 /// Where the light the air scatters is.
@@ -142,6 +146,17 @@ fn chroma() -> bool {
         return on;
     }
     on
+}
+
+/// `VICTORY_AMBIENT_PROBE_LIMIT=1` uses the estimate alone for the diffuse
+/// resolve. The default keeps brighter probe values up to four times the estimate.
+fn probe_limit() -> f32 {
+    static LIMIT: OnceLock<f32> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let limit = std::env::var("VICTORY_AMBIENT_PROBE_LIMIT").unwrap_or_default();
+        let limit = floor_of(&limit);
+        if limit == 0.0 { 4.0 } else { limit.clamp(1.0, 4.0) }
+    })
 }
 
 fn floor_of(set: &str) -> f32 {
@@ -301,6 +316,16 @@ uint pack(float3 c) {
 }
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
+void hold_reflections(uint3 at : SV_DispatchThreadID) {
+    if (at.x >= width || at.y >= height) return;
+    float3 reflected = unpack(light[at.xy]);
+    float peak = max(reflected.r, max(reflected.g, reflected.b));
+    float cap = max(dot(cells[CELLS].rgb, LUMA), least) * follow;
+    if (peak > cap) light[at.xy] = pack(reflected * (cap / peak));
+}
+
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
 void raise(uint3 at : SV_DispatchThreadID) {
     float2 size = float2(width, height);
     if (at.x >= width || at.y >= height) return;
@@ -360,6 +385,10 @@ void raise(uint3 at : SV_DispatchThreadID) {
     // VICTORY_AMBIENT_FLOOR: no point darker than the floor (shaded in
     // creases like the rest).
     found = max(found, float3(1.0, 0.98, 0.94) * least * open);
+    if (abs(most) == 1.0) {
+        light[p] = pack(found);
+        return;
+    }
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
@@ -390,6 +419,7 @@ struct Pass {
     place: ID3D12PipelineState,
     gather: ID3D12PipelineState,
     raise: ID3D12PipelineState,
+    reflections: ID3D12PipelineState,
     air: ID3D12PipelineState,
     cells: ID3D12Resource,
     points: ID3D12Resource,
@@ -422,6 +452,7 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
     let gather = pipeline("GATHER", s!("gather"))?;
     let raise = pipeline("RAISE", s!("raise"))?;
     let air = pipeline("AIR", s!("clear_air"))?;
+    let reflections = pipeline("RAISE", s!("hold_reflections"))?;
     let made = |bytes| buffer(bytes).ok_or_else(windows::core::Error::empty);
     Ok(Pass {
         root: root.ok_or_else(windows::core::Error::empty)?,
@@ -430,6 +461,7 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         place,
         gather,
         raise,
+        reflections,
         air,
         cells: made(CELL_BYTES)?,
         points: made(POINT_BYTES)?,
@@ -498,7 +530,9 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.cells);
     list.keep(&pass.points);
     let [strength, radius] = shade();
-    let floats = [level, constant, strength, radius, 0.1, 0.45];
+    // Reflections use the same estimate as the diffuse light for their cap.
+    let follow = if role == Role::Reflections { 0.5 } else { 0.45 };
+    let floats = [level, constant, strength, radius, 0.1, follow];
     let mut words = [0u32; 12];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
@@ -507,7 +541,8 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[7] = views.size[1];
     words[8] = 0.04f32.to_bits();
     // Its sign says how the bound is taken ([`chroma`]).
-    words[9] = if chroma() { 4.0f32 } else { -4.0f32 }.to_bits();
+    let limit = probe_limit();
+    words[9] = if chroma() { limit } else { -limit }.to_bits();
     words[10] = air().to_bits();
     words[11] = floor().to_bits();
     let l = &list.list;
@@ -534,6 +569,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
                 KEPT.store(true, Ordering::Relaxed);
             }
             Role::Air => run(&pass.air, views.size[0].div_ceil(8), views.size[1].div_ceil(8), views.slices.div_ceil(2)),
+            Role::Reflections => run(&pass.reflections, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1),
             Role::Resolve => {
                 if constant == 0.0 {
                     run(&pass.place, 8, 9, 1);

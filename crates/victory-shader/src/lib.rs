@@ -10,6 +10,7 @@ pub mod bvh;
 pub mod dxbc;
 pub mod dxil;
 pub mod emit;
+pub mod geometry;
 pub mod gfx10;
 pub mod io;
 pub mod ir;
@@ -26,7 +27,7 @@ pub mod structure;
 /// translated before is kept across the rebuild. `victory shaders`
 /// translates again what an earlier build of the translator cached and says
 /// how many came out different: if any did, the bump was due.
-pub const TRANSLATOR_VERSION: u32 = 2;
+pub const TRANSLATOR_VERSION: u32 = 4;
 
 pub use dxbc::{Container, FourCC, Part};
 pub use dxil::{DxilProgram, ShaderKind, XboxExtras};

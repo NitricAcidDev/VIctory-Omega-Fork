@@ -17,13 +17,18 @@ use crate::gfx10::{Dpp, Fields, NULL, Operand};
 use crate::io::{Barycentric, Export, Input, Interp, Io, Target};
 use crate::ir::{EXEC, Exit, Inst, Program, Reg, Value};
 use crate::native::{HwStage, NativeProgram, ResourceType, RootType, StageIo, Usage, UsedResource};
-use crate::resource::{Address, CODE, MEMORY, Resources, Role, Site, Source};
+use crate::resource::{Address, CODE, DRIVER, MEMORY, Resources, Role, Site, Source};
 use crate::structure::{Atom, Bool, LaneExit, Structured};
 
 /// The ray-tracing node test (`image_bvh_intersect_ray`), a child module so
 /// it shares the emitter's state.
 #[path = "intersect.rs"]
 pub(super) mod intersect;
+
+/// A geometry program's LDS rings as its inputs and outputs, a child module so it shares the
+/// emitter's state.
+#[path = "rings.rs"]
+mod rings;
 
 type Why = &'static str;
 
@@ -402,6 +407,8 @@ struct Lower<'a> {
     counters: HashMap<usize, (V, Vec<(V, usize)>)>,
     /// The block a loop stopped by [`LOOP_LIMIT`] leaves the program from.
     abort: Option<usize>,
+    /// A geometry program's vertices so far (see rings).
+    emitted: rings::Emitted,
 }
 
 /// Iterations after which a loop is left (per entry into it), unless
@@ -1428,6 +1435,9 @@ impl<'a> Lower<'a> {
             }
         }
         let mut s = Shader::new(x.native.stage == HwStage::Ps);
+        s.geometry = x.io.geometry.as_ref().map(|g| super::shader::Geometry {
+            max_vertices: g.max_vertices,
+        });
         s.inputs = x.inputs.clone();
         s.outputs = x.outputs.clone();
         let insts = || p.blocks.iter().flat_map(|b| &b.insts);
@@ -1773,6 +1783,7 @@ impl<'a> Lower<'a> {
             code_table: None,
             counters: HashMap::new(),
             abort: None,
+            emitted: Default::default(),
         }
     }
 
@@ -2582,6 +2593,10 @@ impl<'a> Lower<'a> {
                 };
             }
             Input::Barycentric { kind, index } => return self.barycentric(kind, index),
+            Input::PrimitiveId if self.s.geometry.is_some() => {
+                let (entry, i32t) = (self.s.entry, self.s.t.i32);
+                return Val::I32(self.s.op(entry, "primitiveID.i32", Attr::ReadNone, i32t, 108, &[]));
+            }
             Input::PrimitiveId => return Val::Missing("the primitive id"),
             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
             // host's value can be.
@@ -3899,18 +3914,22 @@ impl<'a> Lower<'a> {
             return f;
         }
         let c = self.cur;
-        // Finite values stay as they are, however large.
-        let a = self.unary(6, f);
-        let inf = self.s.m.f32(0x7f80_0000);
-        let infinite = self.s.m.cmp(c, pred::OEQ, a, inf);
-        let zero = self.s.m.f32(0);
-        let negative = self.s.m.cmp(c, pred::OLT, f, zero);
-        let most = self.s.m.f32(SCRUB_MOST.to_bits());
-        let least = self.s.m.f32((-SCRUB_MOST).to_bits());
-        let big = self.s.m.select(c, negative, least, most);
-        let finite = self.s.m.select(c, infinite, big, f);
-        let nan = self.s.m.cmp(c, pred::UNO, f, f);
-        self.s.m.select(c, nan, zero, finite)
+        // Inspect the IEEE-754 bits so driver float optimizations cannot
+        // discard the non-finite checks. Preserve every finite value.
+        let bits = self.as_int(f);
+        let magnitude_mask = self.s.m.i32(0x7fff_ffff);
+        let magnitude = self.s.m.bin(c, Bin::And, bits, magnitude_mask);
+        let infinity = self.s.m.i32(0x7f80_0000);
+        let infinite = self.s.m.cmp(c, pred::EQ, magnitude, infinity);
+        let nan = self.s.m.cmp(c, pred::IUGT, magnitude, infinity);
+        let sign_mask = self.s.m.i32(0x8000_0000);
+        let sign = self.s.m.bin(c, Bin::And, bits, sign_mask);
+        let limit = self.s.m.i32(SCRUB_MOST.to_bits());
+        let signed_limit = self.s.m.bin(c, Bin::Or, sign, limit);
+        let finite = self.s.m.select(c, infinite, signed_limit, bits);
+        let zero = self.s.m.i32(0);
+        let clean = self.s.m.select(c, nan, zero, finite);
+        self.as_float(clean)
     }
 
     fn binary(&mut self, op: u32, a: V, b: V) -> V {
@@ -5104,6 +5123,9 @@ impl<'a> Lower<'a> {
         if *gds {
             return Err("GDS");
         }
+        if self.x.io.geometry.is_some() {
+            return self.ring(inst, b, i);
+        }
         let name = inst.name();
         let guard = self.guard(b, i)?;
         let c = self.cur;
@@ -5567,6 +5589,10 @@ impl<'a> Lower<'a> {
                 self.s
                     .op(self.cur, "barrier", Attr::NoDuplicate, void, 80, &[mode]);
                 Ok(())
+            }
+            // A geometry program's emit or cut: a refusal at once, as for the node test.
+            Fields::Sopp { .. } if self.x.io.geometry.is_some() && name.starts_with("s_sendmsg") => {
+                return self.ring_message(b, i).map_err(|why| unsupported(offset, why));
             }
             Fields::Sopp { .. } => Ok(()),
             Fields::Smem { .. } => self.smem(inst, (b, i)),
@@ -6335,6 +6361,10 @@ impl<'a> Lower<'a> {
         }
         if self.scalar.get(&site).is_some_and(|a| a.param == MEMORY) {
             return self.memory_smem(inst);
+        }
+        if self.scalar.get(&site).is_some_and(|a| a.param == DRIVER) {
+            // (where a geometry program's ring lies in LDS: no ring on the host)
+            return Err("the console driver's table");
         }
         let Some(rest) = name.strip_prefix("s_buffer_load_dword") else {
             return self.descriptor_data(inst, site);
@@ -10833,16 +10863,29 @@ impl<'a> Lower<'a> {
     }
 
     /// Whether the program reads attribute row `row` per vertex (an
-    /// interpolation with computed barycentrics, or P10 or P20): then its
-    /// element is declared constant and read with `attributeAtVertex`.
+    /// interpolation with computed barycentrics, or P10 or P20), or shares
+    /// a packed row with a flat input. Smooth channels on a constant row
+    /// are reconstructed with `attributeAtVertex` and barycentrics.
     fn per_vertex(&self, row: u8) -> bool {
         self.x.io.interps.iter().any(|(_, i)| match *i {
             Interp::Weighted { attribute } => attribute.row == row,
-            Interp::Vertex { attribute, vertex } => {
-                attribute.row == row && vertex != 2 && self.interpolated(row)
-            }
+            Interp::Vertex { attribute, .. } => attribute.row == row,
             Interp::Interpolated { .. } => false,
-        })
+        }) || self.has_flat_input(row)
+    }
+
+    fn has_flat_input(&self, row: u8) -> bool {
+        let flat = |row| {
+            self.x.inputs.iter().any(|e| {
+                e.row == Some(u32::from(row)) && e.interp == 1 && (e.comp != 9 || e.kind == 13)
+            })
+        };
+        flat(row)
+            || matches!(&self.x.native.io, StageIo::Ps { inputs, .. }
+                if inputs.iter().any(|i| i.row == row && i.fp16 && i.pack2))
+                && input_packs(&self.x.native.io, &self.x.inputs)
+                    .iter()
+                    .any(|&(first, second)| first == row && second.is_some_and(flat))
     }
 
     /// Whether the program interpolates attribute row `row` (so the

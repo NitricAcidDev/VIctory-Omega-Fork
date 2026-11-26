@@ -27,7 +27,10 @@ const GLYPH: (u32, u32) = (5, 7);
 const CELL: (u32, u32) = (6, 9);
 /// Characters in a line, lines, and the box's rim in dots.
 const COLUMNS: u32 = 40;
+#[cfg(feature = "diagnostics")]
 const LINES: u32 = 9;
+#[cfg(not(feature = "diagnostics"))]
+const LINES: u32 = 1;
 const RIM: u32 = 3;
 
 /// The texts are put into one of these in turn: the card reads the others,
@@ -175,6 +178,12 @@ struct Counters([u64; COUNTERS]);
 const COUNTERS: usize = 11;
 
 impl Counters {
+    #[cfg(not(feature = "diagnostics"))]
+    fn now() -> Counters {
+        Counters::default()
+    }
+
+    #[cfg(feature = "diagnostics")]
     fn now() -> Counters {
         use super::{CARD_CLOCK_US, COPY_BACK, PREPARING};
         use crate::copystat::{C, peek};
@@ -207,6 +216,7 @@ impl Counters {
 
 /// The text. `c`: [`Counters`] per frame, `ms` a frame's time, `worst` the
 /// longest frame's, `cost` what this takes of a frame, in microseconds.
+#[cfg(feature = "diagnostics")]
 fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec<String> {
     let gb = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
     let (working, private) = crate::copystat::process_memory();
@@ -223,6 +233,11 @@ fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec
         format!("VRAM {:.1}/{:.1} GB  SHARED {:.1}", gb(used), gb(budget), gb(shared)),
         format!("THIS PANEL {:.0} US A FRAME", cost),
     ]
+}
+
+#[cfg(not(feature = "diagnostics"))]
+fn text(_c: &[f64; COUNTERS], ms: f64, worst: f64, _cost: f64, _host: &Host) -> Vec<String> {
+    vec![format!("FPS {:.1}  FRAME {ms:.1} MS  LONGEST {worst:.0}", 1e3 / ms.max(0.001))]
 }
 
 /// The buffers of a box that size and format.
@@ -363,6 +378,7 @@ impl Panel {
         }
         let began = Instant::now();
         // Not the title's: the frame recorder leaves it out.
+        #[cfg(feature = "diagnostics")]
         let _ours = crate::replay::record::unrecorded();
         let scale = scale(height);
         if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {

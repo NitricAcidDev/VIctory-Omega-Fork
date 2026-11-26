@@ -89,6 +89,27 @@ pub(crate) fn same_mode_per_row(elements: &mut [SigElement], read: bool) {
     }
 }
 
+/// DXIL requires elements sharing a register to have the same mode. Mesh
+/// exports inherit the integer's flat declaration. An unread pixel input
+/// can take the mode fixed by its live or inherently flat neighbours.
+pub(super) fn match_packed_row_modes(elements: &mut [SigElement], pixel: bool) {
+    for index in 0..elements.len() {
+        let element = &elements[index];
+        if element.row.is_none() || element.kind != 0 || element.comp != 9
+            || (pixel && element.usage != 0)
+        {
+            continue;
+        }
+        let mut modes = elements.iter()
+            .filter(|other| other.row == element.row && other.interp != 0)
+            .filter(|other| other.comp != 9 || other.kind == 13 || (pixel && other.usage != 0))
+            .map(|other| other.interp);
+        if let Some(mode) = modes.next() && modes.all(|other| other == mode) {
+            elements[index].interp = mode;
+        }
+    }
+}
+
 /// `ISG1`/`OSG1`: 32-byte rows, then the names.
 pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
     let mut out = Vec::new();

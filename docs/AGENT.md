@@ -157,6 +157,37 @@ git diff -U0 OLD NEW -- crates | grep '^-[^-]'
    `CARD_COMPARE_WIDE`, primary's 64-thread tree fold from `ccf29aa`
    `host.rs`) with timestamps, keep the fastest.
 
+### From the RX 7900 XTX fork
+
+`avatarmanz/VIctory-7900XTX` (remote `xtx`; the owner's copy is
+`fornorharry/VIctory-7900XTX`, a shallow checkout in `Leonedia\work`) runs a
+city street at about 53 ms a frame on an RX 7900 XTX, from 57-75 ms before its
+two renderer patches and 280 ms three days earlier. Its base is fxceless
+`a26859f` with 328 commits of its own, so it is taken commit by commit. Its
+`docs/findings.md` says where a frame goes there.
+
+Taken: `5f86fa3` as `VICTORY_CARD_AWAKE=1` (the card's clocks kept up between
+submissions; 37.8 -> 28.6 ms for a captured frame there; not measured here).
+`Launch VIctory (7900 XTX settings).bat` sets it and the fork's other switches
+that exist here.
+
+Next, by the size of what they measured, each behind its switch, off:
+
+| Commit | Switch | What | Needs |
+|--------|--------|------|-------|
+| `86dc109`, `4b82f6c`, `9c23e8d` | `VICTORY_PORT_CONSTANTS` | The title's 174 MB constants ring used in place as a host heap: no uploads, compares or ~6,000 fills a frame | `port.rs` (new), `inplace.rs` `stretch`, `xmem.rs` gives a 32-bit graphics reservation's pages its section's slices in order. `inplace.rs` here has `cover_in`, `Cover::Run`, `views()` already |
+| `9997d25`, `4cb90be` | `VICTORY_PORT_DESCRIPTORS` | Six 32-byte stores in the title's code (byte-checked) mark the descriptor slots they write; `sync_heaps` takes those instead of scanning ~600,000 slots a frame | `victory-loader/src/descriptor_sites.rs`, a hook in `run.rs`, `descriptor.rs` |
+| `3a99ee6`, `e000e02` | `VICTORY_THIN` | List calls written down on the title's threads, translated by eight of ours (75 -> 68 ms there) | `list/thin.rs` |
+| `b620284`, `6f3ede5` | `VICTORY_UNDER_FUSED` | Title bytes under shader writes compared with AVX2 on threads (14 -> 4-7 ms) | |
+| `3bab23c` | `VICTORY_SHOW_AFTER` | A slot shows a new texture only after its upload ran (ended a device loss every ~16 min there) | |
+| `350c686` | `VICTORY_UPLOAD_AHEAD` | First uploads on a copy queue of their own | |
+| `cc03ecb` | `VICTORY_CARD_STEPS` | Reads of title memory under flights done on the card | |
+
+Before the first one: a log of a run with `(7900 XTX settings)` against
+`Launch VIctory.bat` in the same scene, to see what the card and the
+preparing thread take here.
+
+
 ## 6. The ray tracing build
 
 Done as a build of its own, not on `primary`: branch `ray-tracing-test`

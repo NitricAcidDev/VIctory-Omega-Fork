@@ -194,15 +194,17 @@ fn translate_listed(c: &[u8]) -> Result<HostShader, String> {
 /// start of their BLAKE3) whose wave64 compute programs take the wave-wide
 /// form on a card of 32-lane waves ([`victory_shader::emit::with_wave_wide`]).
 /// Each is refused on an RTX 5080 without it and translates with it
-/// (`victory translate` with `VICTORY_WAVE_WIDE=1`, 26 November): the GPU
-/// particles' emitters, the projected decal trails. With these the walls
-/// stayed smooth in the owner's prison prologue. Not the water's light
-/// (another tester saw black blocks with it in another form: fxceless #799)
-/// nor the hair's shadow masks ([`WAVE_WIDE_SHADOWS`]); `all` adds those
-/// seven. For every program the form once lost the card (`emit`).
+/// (`victory translate` with `VICTORY_WAVE_WIDE=1`, 26 November): the hair's
+/// screen-space shadow masks (blocks around the hair where they were left
+/// unwritten), the GPU particles' emitters, the projected decal trails. Not
+/// the water's light (another tester saw black blocks with it in another
+/// form: fxceless #799); `all` adds those five. For every program the form once lost the card (`emit`).
 /// `VICTORY_WAVE_WIDE_ONLY`: a list of hashes in place of these, `none` for
 /// none.
-const WAVE_WIDE_DEFAULT: [&str; 13] = [
+const WAVE_WIDE_DEFAULT: [&str; 15] = [
+    // shadowmask: CS_GenerateShadowMasksHairOnly_SampleHairScreenSpace, CS_GenerateShadowMasks_SampleHairScreenSpace
+    "888af37a584acf98",
+    "2889c21328c69e58",
     // GpuParticleEmit
     "a40ae27594631121",
     "5e3dd99e0f067aee",
@@ -221,12 +223,6 @@ const WAVE_WIDE_DEFAULT: [&str; 13] = [
 ];
 /// water_shading: CS_TransmissionVolumetrics* (`VICTORY_WAVE_WIDE_ONLY=all`).
 const WAVE_WIDE_WATER: [&str; 5] = ["926c46bab3b86bd6", "6f225b641c5b0708", "5dc3b25986622949", "a10179ab7eda0dc3", "6871d6e4b3ac9a10"];
-/// shadowmask: CS_GenerateShadowMasks(HairOnly)_SampleHairScreenSpace (`all`
-/// too). In the wave-wide form they take the blocks around hair away but
-/// band the whole picture (contours on every wall), in two runs out of two
-/// on the RTX 5080 (26 November); refused, blocks around hair.
-/// (`VICTORY_WIDE_THREADS=8` banded the walls as well, on its own.)
-const WAVE_WIDE_SHADOWS: [&str; 2] = ["888af37a584acf98", "2889c21328c69e58"];
 
 fn wave_wide_list() -> &'static [String] {
     static LIST: OnceLock<Vec<String>> = OnceLock::new();
@@ -236,7 +232,7 @@ fn wave_wide_list() -> &'static [String] {
 fn wave_wide_of(value: Option<&str>) -> Vec<String> {
     match value.map(str::trim) {
         None | Some("") => WAVE_WIDE_DEFAULT.iter().map(|h| h.to_string()).collect(),
-        Some("all") => WAVE_WIDE_DEFAULT.iter().chain(&WAVE_WIDE_WATER).chain(&WAVE_WIDE_SHADOWS).map(|h| h.to_string()).collect(),
+        Some("all") => WAVE_WIDE_DEFAULT.iter().chain(&WAVE_WIDE_WATER).map(|h| h.to_string()).collect(),
         Some(v) => v.split(',').map(|h| h.trim().to_lowercase()).filter(|h| h.len() >= 8 && h != "none").collect(),
     }
 }
@@ -523,9 +519,10 @@ mod tests {
     #[test]
     fn the_wave_wide_list_and_its_switch() {
         let default = wave_wide_of(None);
-        assert_eq!(default.len(), 13);
-        // Neither the water's light nor the hair's shadow masks.
-        assert!(!default.iter().any(|h| WAVE_WIDE_WATER.contains(&h.as_str()) || WAVE_WIDE_SHADOWS.contains(&h.as_str())));
+        assert_eq!(default.len(), 15);
+        // The hair's shadow masks are in it; the water's light is not.
+        assert!(default.iter().any(|h| h == "888af37a584acf98") && default.iter().any(|h| h == "2889c21328c69e58"));
+        assert!(!default.iter().any(|h| WAVE_WIDE_WATER.contains(&h.as_str())));
         assert_eq!(wave_wide_of(Some(" ")), default);
         assert_eq!(wave_wide_of(Some("all")).len(), 20);
         assert!(wave_wide_of(Some("none")).is_empty());

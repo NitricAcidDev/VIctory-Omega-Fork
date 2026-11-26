@@ -338,11 +338,33 @@ impl Shader {
         *self.walks.get_or_init(|| container_walks(&self.container))
     }
 
+    /// The program's name as its container holds it (`CS_...`, `PS_...`
+    /// and the like), for the log; `None` if none is found.
+    pub(crate) fn program_name(&self) -> Option<String> {
+        program_name(&self.container)
+    }
+
     /// What the program is to the stand-in light, by the name in its
     /// container. Looked at once, when a draw or dispatch first asks.
     pub(crate) fn light(&self) -> Light {
         *self.light.get_or_init(|| light_of(self.stage, &self.container))
     }
+}
+
+/// The first name of a program in `container`: two capitals and an
+/// underscore (`CS_`, `PS_`, `VS_`, `MS_`) and then letters, digits or
+/// underscores, at least eight bytes in all.
+#[cfg(windows)]
+fn program_name(container: &[u8]) -> Option<String> {
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    container.windows(3).enumerate().find_map(|(at, w)| {
+        let starts = w[0].is_ascii_uppercase() && w[1] == b'S' && w[2] == b'_' && (at == 0 || !word(container[at - 1]));
+        if !starts {
+            return None;
+        }
+        let end = container[at..].iter().position(|&b| !word(b)).map_or(container.len(), |n| at + n);
+        (end - at >= 8).then(|| String::from_utf8_lossy(&container[at..end.min(at + 96)]).into_owned())
+    })
 }
 
 /// [`Shader::light`] of a container.
@@ -397,6 +419,9 @@ mod light_tests {
         assert_eq!(light_of("pixel", &named("CS_UpdateHistory")), Light::None);
         assert_eq!(light_of("compute", &named("ps_sky_paraboloid_reflection")), Light::None);
         assert_eq!(light_of("compute", b"CS"), Light::None);
+        assert_eq!(super::program_name(&named("CS_FaceBlend_Apply")).as_deref(), Some("CS_FaceBlend_Apply_x"));
+        assert_eq!(super::program_name(b"xxCS_ab "), None);
+        assert_eq!(super::program_name(b"ABCS_Something_long "), None);
     }
 }
 

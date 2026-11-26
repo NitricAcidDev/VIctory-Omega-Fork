@@ -600,7 +600,8 @@ impl HostPipeline {
             let pso = match made {
                 Ok(pso) => pso,
                 Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host pipeline refused");
+                    let names: Vec<String> = shaders.iter().filter_map(|s| s.program_name()).collect();
+                    tracing::warn!(error = %e, ?shaders, ?names, "host pipeline refused");
                     host.log_messages();
                     return None;
                 }

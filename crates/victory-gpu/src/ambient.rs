@@ -122,6 +122,28 @@ fn floor() -> f32 {
     *SET.get_or_init(|| floor_of(&std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default()))
 }
 
+/// Whether what the title's program left, and what the air scatters, are
+/// bounded colour by colour (`VICTORY_AMBIENT_CHROMA`, on unless `0`), not
+/// by their luminance alone.
+///
+/// The program leaves the memory of its probes in blocks of the picture,
+/// and those may be any colour. Luminance counts blue at a fourteenth and
+/// red at a fifth, so saturated blue, purple and red blocks passed a bound
+/// of four times the estimate's luminance where the estimate is dark: trees
+/// at dusk and at night glowed and flashed red and blue "like police
+/// lights", near and far (owner's sessions, 26 Nov). Each channel is now
+/// held to four times the estimate's same channel (the floor keeps that
+/// above nothing), the colour kept.
+fn chroma() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_AMBIENT_CHROMA").is_none_or(|v| v != "0"));
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_AMBIENT_CHROMA") {
+        return on;
+    }
+    on
+}
+
 fn floor_of(set: &str) -> f32 {
     set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
 }
@@ -257,7 +279,8 @@ void clear_air(uint3 at : SV_DispatchThreadID) {
     float far = float(at.z) / float(d);
     float cap = air * lerp(dot(cells[CELLS].rgb, LUMA), dot(seen_there, LUMA), far);
     float3 c = scattered[at];
-    float has = dot(c, LUMA);
+    // Colour by colour unless `most` is below 0 (VICTORY_AMBIENT_CHROMA=0).
+    float has = most > 0.0 ? max(c.r, max(c.g, c.b)) : dot(c, LUMA);
     if (has > cap) scattered[at] = c * (cap / has);
 }
 #endif
@@ -340,9 +363,16 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
-    float top = max(dot(found, LUMA) * most, 1e-6);
-    float has = dot(was, LUMA);
-    was *= min(1.0, top / max(has, 1e-6));
+    // (`most` below 0: by luminance alone, as before VICTORY_AMBIENT_CHROMA.)
+    if (most > 0.0) {
+        float3 cap = max(found * most, 1e-6);
+        float3 over = was / cap;
+        was *= min(1.0, 1.0 / max(max(over.r, over.g), max(over.b, 1e-6)));
+    } else {
+        float top = max(dot(found, LUMA) * -most, 1e-6);
+        float has = dot(was, LUMA);
+        was *= min(1.0, top / max(has, 1e-6));
+    }
     light[p] = pack(max(was, found));
 }
 #endif
@@ -476,7 +506,8 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[6] = views.size[0];
     words[7] = views.size[1];
     words[8] = 0.04f32.to_bits();
-    words[9] = 4.0f32.to_bits();
+    // Its sign says how the bound is taken ([`chroma`]).
+    words[9] = if chroma() { 4.0f32 } else { -4.0f32 }.to_bits();
     words[10] = air().to_bits();
     words[11] = floor().to_bits();
     let l = &list.list;

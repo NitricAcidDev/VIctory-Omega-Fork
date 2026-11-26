@@ -7,7 +7,7 @@
 // API would trust.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, c_char, c_void};
 
 use crate::{HleModule, HostPolicy, hle_export, registry, runtime};
 
@@ -52,10 +52,7 @@ pub extern "system" fn GetModuleFileNameW(module: *mut c_void, out: *mut u16, si
         return host::get_module_file_name_w(module, out, size);
     };
     let wide: Vec<u16> = path.encode_utf16().collect();
-    // SAFETY: the title passes a buffer of `size` characters.
-    copy_truncated(&wide, unsafe {
-        std::slice::from_raw_parts_mut(out, size as usize)
-    })
+    copy_truncated(&wide, title_buffer(out, size))
 }
 
 /// See [`GetModuleFileNameW`].
@@ -63,10 +60,18 @@ pub extern "system" fn GetModuleFileNameA(module: *mut c_void, out: *mut u8, siz
     let Some(path) = title_path(module) else {
         return host::get_module_file_name_a(module, out, size);
     };
-    // SAFETY: the title passes a buffer of `size` bytes.
-    copy_truncated(path.as_bytes(), unsafe {
-        std::slice::from_raw_parts_mut(out, size as usize)
-    })
+    copy_truncated(path.as_bytes(), title_buffer(out, size))
+}
+
+/// The title's buffer of `size` elements; none for a null pointer (a slice
+/// may not start at null, even an empty one, so `(NULL, 0)` would be
+/// undefined behaviour).
+fn title_buffer<'a, T>(out: *mut T, size: u32) -> &'a mut [T] {
+    if out.is_null() {
+        return &mut [];
+    }
+    // SAFETY: the title passes a buffer of `size` elements.
+    unsafe { std::slice::from_raw_parts_mut(out, size as usize) }
 }
 
 fn title_path(module: *mut c_void) -> Option<String> {
@@ -350,6 +355,207 @@ fn refuse(file: &str) {
 
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 
+/// The title's argument list: the program, then what was given after `--`.
+/// The host's own would be ours (`victory run <exe> ...`), and the title
+/// looks at fixed places in it (`-skipToIIS` only as the first argument).
+struct TitleArgv {
+    count: std::cell::UnsafeCell<i32>,
+    list: std::cell::UnsafeCell<*mut *mut c_char>,
+}
+
+// SAFETY: never written here after it was made; the title's C runtime start
+// reads it once, on one thread.
+unsafe impl Send for TitleArgv {}
+// SAFETY: as above.
+unsafe impl Sync for TitleArgv {}
+
+/// Kept for the whole run: the title holds on to the pointers.
+fn title_argv(program: &str, args: &[String]) -> TitleArgv {
+    let list: Vec<*mut c_char> = std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .filter_map(|a| std::ffi::CString::new(a).ok())
+        .map(std::ffi::CString::into_raw)
+        .collect();
+    let count = list.len() as i32;
+    // `argv[argc]` is null.
+    let list: Box<[*mut c_char]> = list.into_iter().chain(Some(std::ptr::null_mut())).collect();
+    TitleArgv {
+        count: count.into(),
+        list: Box::leak(list).as_mut_ptr().into(),
+    }
+}
+
+fn argv() -> &'static TitleArgv {
+    static ARGV: std::sync::OnceLock<TitleArgv> = std::sync::OnceLock::new();
+    ARGV.get_or_init(|| {
+        // The program's name stays what the host says (as it was before).
+        let program = std::env::args_os().next().unwrap_or_default();
+        let args = runtime::title_args();
+        tracing::info!(?args, "the title's arguments");
+        title_argv(&program.to_string_lossy(), args)
+    })
+}
+
+/// See [`TitleArgv`].
+pub extern "C" fn __p___argc() -> *mut i32 {
+    argv().count.get()
+}
+
+/// See [`TitleArgv`].
+pub extern "C" fn __p___argv() -> *mut *mut *mut c_char {
+    argv().list.get()
+}
+
+/// The title's thread priorities, but for the lowest two, which become
+/// "below normal". Six of the title's threads run at "idle", the streaming
+/// pager's among them; on the console they have what the rest of the title
+/// leaves of its cores. A PC's processors are also wanted by other programs
+/// and by our own workers (sixteen when pipelines are made): with every
+/// one of them busy such a thread ran once in four seconds or so, when the
+/// host's scheduler took pity, and the loading that waits for it with it
+/// (run stream-3: loads seen to be done 1.1 s late on average, 4.8 s at
+/// worst). `VICTORY_TITLE_PRIORITIES=0`: as the title sets them.
+fn title_priority(asked: i32) -> i32 {
+    const IDLE: i32 = -15;
+    const LOWEST: i32 = -2;
+    const BELOW_NORMAL: i32 = -1;
+    match asked {
+        IDLE..=LOWEST => BELOW_NORMAL,
+        other => other,
+    }
+}
+
+/// [`title_priority`].
+pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32 {
+    static AS_SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let as_set = *AS_SET.get_or_init(|| std::env::var_os("VICTORY_TITLE_PRIORITIES").is_some_and(|v| v == "0"));
+    let priority = if as_set { priority } else { title_priority(priority) };
+    // SAFETY: the title passes a thread handle.
+    unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
+}
+
+/// Where the title's threads may run (`VICTORY_TITLE_AFFINITY`).
+///
+/// The title places its threads as on the console, whose seven cores it
+/// numbers 0 to 13, two hardware threads a core. On a PC that kept all of
+/// them on its first seven cores: on a Ryzen 9 9900X (12 cores, 24
+/// threads, 26 Nov) eight of its workers shared processors 0-7 (four
+/// cores), eleven more 8-12, its busiest thread 0-13, while our forty
+/// threads ran on every processor, those seven cores too, and processors
+/// 14-23 ran nothing of the title's. Its frames waited for its own
+/// threads, often woken and not yet running. With every processor for all
+/// of them (`all`) the prologue ran as fast as before (median 25 fps both),
+/// so the title's own placement stays the default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    /// As the title sets them (the default).
+    AsSet,
+    /// Every processor of the process (`all`).
+    All,
+    /// Each console core's threads on its share of the PC's cores, both
+    /// hardware threads of each (`spread`).
+    Spread,
+}
+
+fn placement_of(value: Option<&str>) -> Placement {
+    match value.map(str::trim) {
+        Some("all" | "1") => Placement::All,
+        Some("spread") => Placement::Spread,
+        _ => Placement::AsSet,
+    }
+}
+
+fn placement() -> Placement {
+    static HOW: std::sync::OnceLock<Placement> = std::sync::OnceLock::new();
+    *HOW.get_or_init(|| {
+        let how = placement_of(std::env::var("VICTORY_TITLE_AFFINITY").ok().as_deref());
+        tracing::info!(?how, "where the title's threads run (VICTORY_TITLE_AFFINITY: unset as it sets them, all, spread)");
+        how
+    })
+}
+
+/// The cores the title's masks name: seven, two hardware threads each.
+const CONSOLE_CORES: usize = 7;
+
+/// The processors a title thread gets for the console's `asked`: `process`
+/// is the process's own (0: not known), `cores` the PC's cores in order,
+/// each as the mask of its processors.
+fn title_mask(asked: usize, how: Placement, process: usize, cores: &[usize]) -> usize {
+    let mask = match how {
+        Placement::AsSet => return asked,
+        Placement::All => process,
+        Placement::Spread if cores.len() > CONSOLE_CORES => {
+            let n = cores.len();
+            let mut mask = 0;
+            for bit in (0..usize::BITS as usize).filter(|&b| asked >> b & 1 != 0) {
+                let core = bit / 2;
+                if core >= CONSOLE_CORES {
+                    mask |= 1 << bit;
+                    continue;
+                }
+                for c in &cores[core * n / CONSOLE_CORES..(core + 1) * n / CONSOLE_CORES] {
+                    mask |= c;
+                }
+            }
+            if process == 0 { mask } else { mask & process }
+        }
+        Placement::Spread => asked,
+    };
+    if mask == 0 { asked } else { mask }
+}
+
+/// The PC's cores (group 0) in order, each as the mask of its processors.
+fn host_cores() -> &'static [usize] {
+    static CORES: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    CORES.get_or_init(|| {
+        use windows_sys::Win32::System::SystemInformation::{
+            GetLogicalProcessorInformation, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION,
+        };
+        let mut bytes = 0u32;
+        // SAFETY: a size query.
+        unsafe { GetLogicalProcessorInformation(std::ptr::null_mut(), &mut bytes) };
+        let n = bytes as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
+        let mut all: Vec<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> = (0..n).map(|_| Default::default()).collect();
+        // SAFETY: a buffer of the size asked for.
+        if n == 0 || unsafe { GetLogicalProcessorInformation(all.as_mut_ptr(), &mut bytes) } == 0 {
+            return Vec::new();
+        }
+        let mut cores: Vec<usize> = all
+            .iter()
+            .filter(|i| i.Relationship == RelationProcessorCore)
+            .map(|i| i.ProcessorMask)
+            .collect();
+        cores.sort_unstable_by_key(|m| m.trailing_zeros());
+        cores
+    })
+}
+
+/// [`Placement`]: the title's mask, widened.
+pub extern "system" fn SetThreadGroupAffinity(
+    thread: *mut c_void,
+    affinity: *const windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY,
+    previous: *mut windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY,
+) -> i32 {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+    let how = placement();
+    if affinity.is_null() || how == Placement::AsSet {
+        // SAFETY: as the title passes them.
+        return unsafe { windows_sys::Win32::System::Threading::SetThreadGroupAffinity(thread, affinity, previous) };
+    }
+    // SAFETY: the title passes a readable record.
+    let mut given = unsafe { *affinity };
+    if given.Group == 0 {
+        let (mut process, mut system) = (0usize, 0usize);
+        // SAFETY: plain out values.
+        if unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) } == 0 {
+            process = 0;
+        }
+        given.Mask = title_mask(given.Mask, how, process, host_cores());
+    }
+    // SAFETY: our copy, and the title's out record.
+    unsafe { windows_sys::Win32::System::Threading::SetThreadGroupAffinity(thread, &given, previous) }
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -358,11 +564,14 @@ pub(crate) fn module() -> HleModule {
             "kernelbase.dll",
             "api-ms-win-core-libraryloader-*",
             "api-ms-win-core-processthreads-*",
+            "api-ms-win-core-processtopology-*",
             "api-ms-win-core-debug-*",
             "api-ms-win-core-errorhandling-*",
             "api-ms-win-crt-runtime-*",
         ],
         exports: vec![
+            hle_export!(__p___argc),
+            hle_export!(__p___argv),
             hle_export!(GetModuleHandleW),
             hle_export!(GetModuleHandleA),
             hle_export!(GetModuleFileNameW),
@@ -382,6 +591,8 @@ pub(crate) fn module() -> HleModule {
             hle_export!(_invalid_parameter_noinfo_noreturn),
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
+            hle_export!(SetThreadPriority),
+            hle_export!(SetThreadGroupAffinity),
         ],
     }
 }
@@ -596,6 +807,79 @@ mod host {
 mod tests {
     use super::*;
 
+    /// The title's idle and lowest threads run below normal; the others as
+    /// it sets them.
+    #[test]
+    fn no_title_thread_waits_for_idle_processors() {
+        let given: Vec<i32> = [-15, -2, -1, 0, 1, 2, 15].into_iter().map(title_priority).collect();
+        assert_eq!(given, [-1, -1, -1, 0, 1, 2, 15]);
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority};
+        std::thread::spawn(|| {
+            // SAFETY: plain calls on this thread.
+            let thread = unsafe { GetCurrentThread() };
+            assert_eq!(SetThreadPriority(thread, -15), 1);
+            // SAFETY: as above.
+            assert_eq!(unsafe { GetThreadPriority(thread) }, -1);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The console's masks on a PC of twelve cores of two threads each.
+    #[test]
+    fn title_threads_are_placed_over_the_pcs_cores() {
+        assert_eq!(placement_of(None), Placement::AsSet);
+        assert_eq!(placement_of(Some("0")), Placement::AsSet);
+        assert_eq!(placement_of(Some("all")), Placement::All);
+        assert_eq!(placement_of(Some(" spread ")), Placement::Spread);
+        let cores: Vec<usize> = (0..12).map(|c| 0b11 << (2 * c)).collect();
+        let process = (1 << 24) - 1;
+        // As set, and all of the process's.
+        assert_eq!(title_mask(0xff, Placement::AsSet, process, &cores), 0xff);
+        assert_eq!(title_mask(0xff, Placement::All, process, &cores), process);
+        assert_eq!(title_mask(0x2000, Placement::All, 0, &cores), 0x2000);
+        // Spread: console core c takes the PC's cores c*12/7 .. (c+1)*12/7.
+        assert_eq!(title_mask(0b01, Placement::Spread, process, &cores), 0b11);
+        assert_eq!(title_mask(0b10, Placement::Spread, process, &cores), 0b11);
+        assert_eq!(title_mask(0b100, Placement::Spread, process, &cores), 0b1111 << 2);
+        assert_eq!(title_mask(0xff, Placement::Spread, process, &cores), 0xfff);
+        assert_eq!(title_mask(0x3fff, Placement::Spread, process, &cores), process);
+        assert_eq!(title_mask(0x2000, Placement::Spread, process, &cores), 0b1111 << 20);
+        // Inside the process's, and never nothing.
+        assert_eq!(title_mask(0x3fff, Placement::Spread, 0xff, &cores), 0xff);
+        assert_eq!(title_mask(0x2000, Placement::Spread, 0xff, &cores), 0x2000);
+        // Too few cores to spread over: as set.
+        assert_eq!(title_mask(0xff, Placement::Spread, 0xff, &cores[..4]), 0xff);
+    }
+
+    /// A thread the title puts on one processor may run on all of them.
+    #[test]
+    fn a_title_threads_mask_is_widened() {
+        use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask};
+        let (mut process, mut system) = (0usize, 0usize);
+        // SAFETY: plain out values.
+        assert_ne!(unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) }, 0);
+        assert!(!host_cores().is_empty());
+        assert_eq!(host_cores().iter().fold(0, |a, c| a | c) & process, process);
+        std::thread::spawn(move || {
+            // SAFETY: plain calls on this thread.
+            let thread = unsafe { GetCurrentThread() };
+            let one = GROUP_AFFINITY { Mask: 1, Group: 0, Reserved: [0; 3] };
+            let mut before = GROUP_AFFINITY::default();
+            assert_eq!(SetThreadGroupAffinity(thread, &one, &mut before), 1);
+            // What it has now is what the next call says was before.
+            let mut now = GROUP_AFFINITY::default();
+            assert_eq!(SetThreadGroupAffinity(thread, &before, &mut now), 1);
+            assert_eq!(now.Mask, title_mask(1, placement(), process, host_cores()));
+            if placement() == Placement::All {
+                assert_eq!(now.Mask, process);
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn title_images_report_their_original_path() {
         let base = 0x7000_0000_0000;
@@ -613,6 +897,29 @@ mod tests {
         let mut small = [0u8; 4];
         assert_eq!(GetModuleFileNameA(module, small.as_mut_ptr(), 4), 4);
         assert_eq!(&small, &[b'C', b':', b'\\', 0]);
+    }
+
+    /// The title's arguments come right after the program, and the list ends
+    /// in a null pointer; without any there is only the program.
+    #[test]
+    fn the_title_gets_its_own_arguments() {
+        let read = |made: &TitleArgv| {
+            // SAFETY: made above, kept for the whole run.
+            unsafe {
+                let (count, list) = (*made.count.get() as usize, *made.list.get());
+                assert!((*list.add(count)).is_null());
+                (0..count)
+                    .map(|i| CStr::from_ptr(*list.add(i)).to_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let some = title_argv("victory.exe", &["-skipToIIS".into(), "-x=1".into()]);
+        assert_eq!(read(&some), ["victory.exe", "-skipToIIS", "-x=1"]);
+        assert_eq!(read(&title_argv("victory.exe", &[])), ["victory.exe"]);
+        // What the title is given: the same list every time.
+        assert_eq!(__p___argc(), __p___argc());
+        // SAFETY: as above.
+        unsafe { assert_eq!((*__p___argc(), (**__p___argv()).is_null()), (1, false)) };
     }
 
     fn w(text: &str) -> Vec<u16> {
@@ -683,5 +990,21 @@ mod tests {
         let runtime = LoadLibraryA(c"xgameruntime.dll".as_ptr().cast());
         assert!(!runtime.is_null());
         assert_eq!(GetModuleHandleW(w("XGameRuntime.dll").as_ptr()), runtime);
+    }
+
+    /// No buffer: nothing written, the error says it was too small.
+    #[test]
+    fn a_title_image_name_into_no_buffer() {
+        let base = 0x7300_0000_0000;
+        runtime::set_image_path(base, std::path::Path::new(r"C:\title\game.exe"));
+        let module = base as *mut c_void;
+        assert_eq!(GetModuleFileNameW(module, std::ptr::null_mut(), 0), 0);
+        assert_eq!(GetModuleFileNameA(module, std::ptr::null_mut(), 0), 0);
+        #[cfg(windows)]
+        {
+            // SAFETY: reads this thread's last error.
+            let last = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            assert_eq!(last, ERROR_INSUFFICIENT_BUFFER);
+        }
     }
 }

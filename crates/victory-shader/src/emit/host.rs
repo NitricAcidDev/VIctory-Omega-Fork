@@ -15,10 +15,6 @@ use crate::dxbc::{Container, FourCC};
 
 pub struct Host {
     pub device: ID3D12Device,
-    /// The root parameter of the table of biases (`SLOT_BIASES`) in each
-    /// root signature made that has one.
-    #[cfg(test)]
-    bias_params: std::sync::Mutex<Vec<(usize, u32)>>,
 }
 
 /// What the stage declares that a pipeline must match.
@@ -123,11 +119,7 @@ impl Host {
                     sm.HighestShaderModel.0
                 ));
             }
-            Ok(Host {
-                device,
-                #[cfg(test)]
-                bias_params: Default::default(),
-            })
+            Ok(Host { device })
         }
     }
 
@@ -176,13 +168,7 @@ impl Host {
             .collect();
         views.sort_unstable();
         views.dedup();
-        #[cfg(test)]
-        let mut bias_param = None;
         for (slot, kind) in views {
-            #[cfg(test)]
-            if (slot, kind) == (super::SLOT_BIASES, 1) {
-                bias_param = Some(params.len() as u32);
-            }
             params.push(D3D12_ROOT_PARAMETER1 {
                 ParameterType: match kind {
                     1 => D3D12_ROOT_PARAMETER_TYPE_SRV,
@@ -257,17 +243,7 @@ impl Host {
                 blob.GetBufferPointer().cast::<u8>(),
                 blob.GetBufferSize(),
             );
-            let root: ID3D12RootSignature = self.device.CreateRootSignature(0, bytes).map_err(err)?;
-            #[cfg(test)]
-            {
-                use windows::core::Interface;
-                let at = root.as_raw() as usize;
-                let mut params = self.bias_params.lock().unwrap_or_else(|e| e.into_inner());
-                // Whatever was made at this address before was released.
-                params.retain(|p| p.0 != at);
-                params.extend(bias_param.map(|param| (at, param)));
-            }
-            Ok(root)
+            self.device.CreateRootSignature(0, bytes).map_err(err)
         }
     }
 
@@ -1018,8 +994,8 @@ fn transition(
 pub enum View<'a> {
     /// An RGBA32F texture SRV (width, height, texels).
     Texture(u32, u32, &'a [[f32; 4]]),
-    /// An RGBA32F cube SRV (face size, texels of faces +x -x +y -y +z -z).
-    Cube(u32, &'a [[f32; 4]]),
+    /// An RGBA32F cube SRV (face size, mip count, texels in D3D subresource order).
+    Cube(u32, u16, &'a [[f32; 4]]),
     /// A raw buffer UAV of this many dwords, zeroed.
     RawUav(u32),
     /// An RGBA32F texture UAV (width, height), zeroed.
@@ -1028,18 +1004,16 @@ pub enum View<'a> {
     UintTextureUav(u32, u32),
     /// A typed RGBA16F buffer UAV of this many elements, zeroed.
     HalfUav(u32),
+    /// A typed buffer UAV pre-filled with `data` (`format`, bytes per element).
+    TypedUav {
+        data: &'a [u32],
+        format: DXGI_FORMAT,
+        elem_bytes: u32,
+    },
     /// A constant buffer of these dwords.
     Cbv(&'a [u32]),
     /// A buffer SRV over these dwords.
     Buffer { data: &'a [u32], stride: Stride },
-    /// A raw view of `dwords` dwords from dword `dword` of a buffer over
-    /// `data`, or (`uav`) of a zeroed unordered access buffer of its size.
-    Window {
-        data: &'a [u32],
-        dword: u32,
-        dwords: u32,
-        uav: bool,
-    },
 }
 
 /// How [`View::Buffer`] is viewed.
@@ -1063,59 +1037,6 @@ pub struct Dispatch<'a> {
     pub views: &'a [View<'a>],
     pub samplers: &'a [D3D12_SAMPLER_DESC],
     pub groups: [u32; 3],
-}
-
-#[cfg(test)]
-impl Host {
-    /// For a dispatch of a program that looks up where its views start
-    /// (`SLOT_BIASES`) and that brings no table: the table's root parameter
-    /// in `root`, and a table of zeros (every view starts where the title's
-    /// does).
-    fn zero_biases(
-        &self,
-        root: &ID3D12RootSignature,
-        bound: &[(u32, Root)],
-    ) -> Result<Option<(u32, ID3D12Resource)>, String> {
-        use windows::core::Interface;
-        let at = root.as_raw() as usize;
-        let params = self.bias_params.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(&(_, param)) = params.iter().find(|p| p.0 == at) else {
-            return Ok(None);
-        };
-        if bound.iter().any(|b| b.0 == param) {
-            return Ok(None);
-        }
-        let mut table: Option<ID3D12Resource> = None;
-        // SAFETY: plain creation of an upload buffer (zeroed).
-        unsafe {
-            self.device
-                .CreateCommittedResource(
-                    &D3D12_HEAP_PROPERTIES {
-                        Type: D3D12_HEAP_TYPE_UPLOAD,
-                        ..Default::default()
-                    },
-                    D3D12_HEAP_FLAG_NONE,
-                    &D3D12_RESOURCE_DESC {
-                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                        Width: 1 << 16,
-                        Height: 1,
-                        DepthOrArraySize: 1,
-                        MipLevels: 1,
-                        SampleDesc: DXGI_SAMPLE_DESC {
-                            Count: 1,
-                            Quality: 0,
-                        },
-                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-                        ..Default::default()
-                    },
-                    D3D12_RESOURCE_STATE_GENERIC_READ,
-                    None,
-                    &mut table,
-                )
-                .map_err(err)?;
-        }
-        Ok(table.map(|t| (param, t)))
-    }
 }
 
 #[cfg(test)]
@@ -1255,20 +1176,23 @@ impl Host {
                 at.ptr += i * view_size;
                 match *v {
                     View::Texture(..) | View::Cube(..) => {
-                        let (w, h, texels, faces) = match *v {
-                            View::Texture(w, h, t) => (w, h, t, 1),
-                            View::Cube(n, t) => (n, n, t, 6),
+                        let (w, h, mut texels, faces, mips) = match *v {
+                            View::Texture(w, h, t) => (w, h, t, 1, 1),
+                            View::Cube(n, mips, t) => (n, n, t, 6, mips),
                             _ => unreachable!(),
                         };
                         let mut desc = texture(w, h, D3D12_RESOURCE_FLAG_NONE);
                         desc.DepthOrArraySize = faces as u16;
+                        desc.MipLevels = mips;
                         let tex = make(
                             D3D12_HEAP_TYPE_DEFAULT,
                             &desc,
                             D3D12_RESOURCE_STATE_COPY_DEST,
                         )?;
-                        let pitch = (w as usize * 16).next_multiple_of(256);
-                        for face in 0..faces as usize {
+                        for sub in 0..u32::from(mips) * faces {
+                            let mip = sub % u32::from(mips);
+                            let (w, h) = ((w >> mip).max(1), (h >> mip).max(1));
+                            let pitch = (w as usize * 16).next_multiple_of(256);
                             let upload = make(
                                 D3D12_HEAP_TYPE_UPLOAD,
                                 &buffer((pitch * h as usize) as u64, D3D12_RESOURCE_FLAG_NONE),
@@ -1276,9 +1200,10 @@ impl Host {
                             )?;
                             let mut p = std::ptr::null_mut();
                             upload.Map(0, None, Some(&mut p)).map_err(err)?;
-                            let texels = &texels[face * (w * h) as usize..];
+                            let (level, rest) = texels.split_at((w * h) as usize);
+                            texels = rest;
                             for y in 0..h as usize {
-                                let row = &texels[y * w as usize..(y + 1) * w as usize];
+                                let row = &level[y * w as usize..(y + 1) * w as usize];
                                 std::ptr::copy_nonoverlapping(
                                     row.as_ptr().cast::<u8>(),
                                     p.cast::<u8>().add(y * pitch),
@@ -1287,7 +1212,7 @@ impl Host {
                             }
                             upload.Unmap(0, None);
                             let mut at_face = subresource(&tex);
-                            at_face.Anonymous.SubresourceIndex = face as u32;
+                            at_face.Anonymous.SubresourceIndex = sub;
                             list.CopyTextureRegion(
                                 &at_face,
                                 0,
@@ -1309,7 +1234,7 @@ impl Host {
                             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
                             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
                                 TextureCube: D3D12_TEXCUBE_SRV {
-                                    MipLevels: 1,
+                                    MipLevels: u32::from(mips),
                                     ..Default::default()
                                 },
                             },
@@ -1348,6 +1273,46 @@ impl Host {
                                 Buffer: D3D12_BUFFER_UAV {
                                     NumElements: elements,
                                     Flags: flags,
+                                    ..Default::default()
+                                },
+                            },
+                        };
+                        dev.CreateUnorderedAccessView(&b, None, Some(&desc), at);
+                        let rb = make(
+                            D3D12_HEAP_TYPE_READBACK,
+                            &buffer(bytes, D3D12_RESOURCE_FLAG_NONE),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        )?;
+                        uavs.push((b, None, n, rb));
+                    }
+                    View::TypedUav {
+                        data,
+                        format,
+                        elem_bytes,
+                    } => {
+                        let n = data.len() as u32;
+                        let bytes = u64::from(n) * 4;
+                        let elements = (bytes / u64::from(elem_bytes)) as u32;
+                        let b = make(
+                            D3D12_HEAP_TYPE_DEFAULT,
+                            &buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        )?;
+                        let up = upload(data)?;
+                        list.CopyBufferRegion(&b, 0, &up, 0, bytes);
+                        list.ResourceBarrier(&[transition(
+                            &b,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        )]);
+                        keep.push(up);
+                        let desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                            Format: format,
+                            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                                Buffer: D3D12_BUFFER_UAV {
+                                    NumElements: elements,
+                                    Flags: D3D12_BUFFER_UAV_FLAG_NONE,
                                     ..Default::default()
                                 },
                             },
@@ -1406,52 +1371,6 @@ impl Host {
                         );
                         keep.push(b);
                     }
-                    View::Window { data, dword, dwords, uav } => {
-                        let bytes = data.len() as u64 * 4;
-                        if uav {
-                            let b = make(
-                                D3D12_HEAP_TYPE_DEFAULT,
-                                &buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-                                D3D12_RESOURCE_STATE_COMMON,
-                            )?;
-                            let desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-                                Format: DXGI_FORMAT_R32_TYPELESS,
-                                ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-                                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                                    Buffer: D3D12_BUFFER_UAV {
-                                        FirstElement: u64::from(dword),
-                                        NumElements: dwords,
-                                        Flags: D3D12_BUFFER_UAV_FLAG_RAW,
-                                        ..Default::default()
-                                    },
-                                },
-                            };
-                            dev.CreateUnorderedAccessView(&b, None, Some(&desc), at);
-                            let rb = make(
-                                D3D12_HEAP_TYPE_READBACK,
-                                &buffer(bytes, D3D12_RESOURCE_FLAG_NONE),
-                                D3D12_RESOURCE_STATE_COPY_DEST,
-                            )?;
-                            uavs.push((b, None, data.len() as u32, rb));
-                        } else {
-                            let b = upload(data)?;
-                            let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
-                                Format: DXGI_FORMAT_R32_TYPELESS,
-                                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
-                                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                                    Buffer: D3D12_BUFFER_SRV {
-                                        FirstElement: u64::from(dword),
-                                        NumElements: dwords,
-                                        StructureByteStride: 0,
-                                        Flags: D3D12_BUFFER_SRV_FLAG_RAW,
-                                    },
-                                },
-                            };
-                            dev.CreateShaderResourceView(&b, Some(&desc), at);
-                            keep.push(b);
-                        }
-                    }
                     View::Buffer { data, stride } => {
                         let b = upload(data)?;
                         let (format, elements, stride, flags) = match stride {
@@ -1505,10 +1424,6 @@ impl Host {
             }
             list.SetDescriptorHeaps(&[Some(views.clone()), Some(samplers.clone())]);
             list.SetComputeRootSignature(root);
-            let biases = self.zero_biases(root, &d.roots)?;
-            if let Some((param, table)) = &biases {
-                list.SetComputeRootShaderResourceView(*param, table.GetGPUVirtualAddress());
-            }
             for (param, arg) in &d.roots {
                 match arg {
                     Root::Constants(data) => list.SetComputeRoot32BitConstants(

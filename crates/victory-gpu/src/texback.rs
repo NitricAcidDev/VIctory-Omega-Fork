@@ -8,8 +8,8 @@
 //! the title read those two kinds), and boats sank.
 //!
 //! For textures of the kinds in `VICTORY_TEXTURE_BACK` (comma-separated
-//! `<width>x<height>f<format>`; `1` for the four water formats found by
-//! the upstream trace), a list in which shaders write one copies it
+//! `<width>x<height>f<format>`; unset or `1`: the four water formats found by
+//! the upstream trace; `0`: none), a list in which shaders write one copies it
 //! into a read-back buffer of ours when it closes, and once the list has run
 //! the texels are tiled into the texture's title memory in the console's
 //! layout, as the console's GPU would have left them.
@@ -32,9 +32,8 @@ fn kinds() -> &'static [(u64, u32, u32)] {
     KINDS.get_or_init(|| {
         const DEFAULT: &str = "256x256f41,256x256f16,64x64f16,128x128f36";
         let list = match std::env::var("VICTORY_TEXTURE_BACK").as_deref() {
-            Ok("1") => DEFAULT.to_owned(),
+            Ok("1") | Err(_) => DEFAULT.to_owned(),
             Ok(spec) => spec.to_owned(),
-            Err(_) => String::new(),
         };
         let kinds: Vec<(u64, u32, u32)> = list
             .split(',')
@@ -115,8 +114,8 @@ impl Target {
     pub(crate) fn new(resource: This) -> Option<Self> {
         // Keep the host copy independently of the title's resource lifetime.
         let copy = crate::resource::host_copy(resource)?;
+        let _mapping = crate::watch::title_memory_reading();
         let (layout, at, size) = crate::resource::title_texture(resource)?;
-        let _mapping = crate::watch::title_memory_reading(at, size);
         let end = at.checked_add(size).filter(|&end| at != 0 && end > at)?;
         let ticket = track(resource as usize, at, end);
         Some(Self { copy, layout, ticket })
@@ -202,9 +201,7 @@ pub(crate) fn record(list: &ID3D12GraphicsCommandList, target: Target) -> Option
 pub(crate) fn land(back: &Back) {
     static COPIED: AtomicU64 = AtomicU64::new(0);
     static STALE: AtomicU64 = AtomicU64::new(0);
-    let (at, end) = back.range();
-    let size = end - at;
-    let _mapping = crate::watch::title_memory_reading(at, size);
+    let _mapping = crate::watch::title_memory_reading();
     let _ticket_guard = TICKETS.lock().unwrap_or_else(|e| e.into_inner());
     if !back.ticket.valid.load(Ordering::Acquire) {
         let skipped = STALE.fetch_add(1, Ordering::Relaxed) + 1;
@@ -213,6 +210,8 @@ pub(crate) fn land(back: &Back) {
         }
         return;
     }
+    let (at, end) = back.range();
+    let size = end - at;
     let mut tiled = vec![0u8; size];
     // Keep title bytes the subresources do not cover.
     if !crate::host::read_into(at as *const u8, &mut tiled) {

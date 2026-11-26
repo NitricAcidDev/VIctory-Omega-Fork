@@ -56,6 +56,9 @@ pub const FIRST: u32 = 32;
 /// console load (`s_buffer_load_dwordx2` to `x16` from an SRV, a
 /// `global_load_dwordx2` to `x4`) by one call for every four of them, not
 /// by a call each (`lower.rs`, `raw_dwords`). The same bytes are read.
+/// From fxceless/victory-fork c36971b2. On an RX 7900 XTX it is worth nothing:
+/// the yard's frame replayed turn by turn, dispatches and draws 18.47 -> 18.45
+/// ms (12 loops) and 18.23 -> 18.16 (5 loops): the driver joins the loads.
 pub const WIDE: u32 = 64;
 /// The passes over the module.
 pub const MODULE: u32 = DEAD | FOLD | REUSE | FACTS | LOADS;
@@ -72,8 +75,8 @@ pub const DEFAULT: u32 = ALL & !WIDE;
 pub(crate) struct Usage {
     /// A wave or quad operation.
     pub wave_ops: bool,
-    /// A 64-bit float (`double`), as a result or an operand.
-    pub doubles: bool,
+    /// A rasterizer ordered view.
+    pub rovs: bool,
     /// A 64-bit integer, as a result or an operand.
     pub int64: bool,
     /// A typed load of several components from a UAV.
@@ -206,10 +209,6 @@ pub(super) enum Effect {
 
 pub(super) fn effect(f: &Func) -> Effect {
     let name = f.name.strip_prefix("dx.op.").unwrap_or(&f.name);
-    // Wave and quad operations depend on which lanes are active.
-    if name.starts_with("wave") || name.starts_with("quad") {
-        return Effect::Lanes;
-    }
     match f.attr {
         Some(Attr::ReadNone) => Effect::Pure,
         // A shader cannot write a constant buffer or resize a resource.
@@ -218,7 +217,11 @@ pub(super) fn effect(f: &Func) -> Effect {
         {
             Effect::Pure
         }
+        Some(Attr::ReadOnly) if name.starts_with("wave") => Effect::Lanes,
         Some(Attr::ReadOnly) => Effect::Reads,
+        // Declared with the attribute of calls that have effects, and have
+        // none: they read the other lanes' values.
+        _ if name.starts_with("wave") || name.starts_with("quad") => Effect::Lanes,
         _ => Effect::Writes,
     }
 }
@@ -399,13 +402,89 @@ impl Module {
     }
 
     /// An integer constant's width and value (the bits of that width).
-    fn int_k(&self, v: V) -> Option<(u32, u64)> {
+    pub(crate) fn int_k(&self, v: V) -> Option<(u32, u64)> {
         let V::Const(i) = v else { return None };
         let (ty, Const::Int(x)) = &self.consts[i as usize] else {
             return None;
         };
         let bits = self.int_bits(*ty)?;
         Some((bits, *x as u64 & mask(bits)))
+    }
+
+    /// The bits of a 32-bit float that is a constant, given as one or as a
+    /// cast of an integer constant.
+    pub(crate) fn float_k(&self, v: V) -> Option<f32> {
+        let (v, cast) = match v {
+            V::Inst(i) => match self.insts[i as usize].op {
+                Op::Cast(Cast::Bitcast, x) => (x, true),
+                _ => return None,
+            },
+            _ => (v, false),
+        };
+        let V::Const(i) = v else { return None };
+        match &self.consts[i as usize].1 {
+            Const::Float(bits) if !cast => Some(f32::from_bits(*bits)),
+            Const::Int(_) if cast => {
+                let (bits, x) = self.int_k(v)?;
+                (bits == 32).then_some(f32::from_bits(x as u32))
+            }
+            _ => None,
+        }
+    }
+
+    /// For a float that is a number and not an infinity whatever the program
+    /// reads: a power of two its magnitude does not pass.
+    pub(crate) fn bounded(&self, v: V, depth: u32) -> Option<f32> {
+        if let Some(k) = self.float_k(v) {
+            return k.is_finite().then(|| k.abs().max(1e-30).log2().ceil());
+        }
+        let V::Inst(i) = v else { return None };
+        let depth = depth.checked_sub(1)?;
+        let of = |v: V| self.bounded(v, depth);
+        // (A power that overflows, or might with rounding, is no bound.)
+        let held = |b: f32| (b < 126.0).then_some(b);
+        match &self.insts[i as usize].op {
+            Op::Cast(Cast::UiToFp | Cast::SiToFp, _) => Some(32.0),
+            Op::Cast(Cast::Bitcast, x) => match *x {
+                V::Inst(j) => match self.insts[j as usize].op {
+                    Op::Cast(Cast::Bitcast, y) if self.type_of(y) == self.type_of(v) => of(y),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Op::Bin(Bin::Mul, a, b) => held(of(*a)? + of(*b)?),
+            Op::Bin(Bin::Add | Bin::Sub, a, b) => held(of(*a)?.max(of(*b)?) + 1.0),
+            Op::Select(_, a, b) => Some(of(*a)?.max(of(*b)?)),
+            Op::Call(_, args) => {
+                let (_, code) = self.int_k(*args.first()?)?;
+                match (code, &args[1..]) {
+                    // Saturated, a fraction, a cosine or sine (of a number).
+                    (7, [_]) => Some(0.0),
+                    (6, [x]) => of(*x),
+                    (22 | 12 | 13, [x]) => of(*x).map(|_| 0.0),
+                    (26..=29, [x]) => held(of(*x)? + 1.0),
+                    // Of two numbers; or one of them the other way round: the
+                    // minimum (36) of a constant and a maximum of another.
+                    (35 | 36, [a, b]) => match (of(*a), of(*b)) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        _ => {
+                            let other = if code == 35 { 36 } else { 35 };
+                            let (inner, k) = if self.float_k(*b).is_some() { (*a, *b) } else { (*b, *a) };
+                            let k = self.float_k(k).and_then(|_| of(k))?;
+                            let V::Inst(j) = inner else { return None };
+                            let Op::Call(_, inner) = &self.insts[j as usize].op else { return None };
+                            let (_, code) = self.int_k(*inner.first()?)?;
+                            let low = inner[1..].iter().find(|x| self.float_k(**x).is_some())?;
+                            (code == other).then_some(())?;
+                            Some(k.max(of(*low)?))
+                        }
+                    },
+                    (46, [a, b, c]) => held((of(*a)? + of(*b)?).max(of(*c)?) + 1.0),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// The constant `x` of the integer type `ty`, kept sign-extended as
@@ -979,7 +1058,6 @@ impl Module {
         let mut u = Usage::default();
         let reached = self.reached();
         let wide = |ty: Ty| self.types[ty.0 as usize] == TypeDef::Int(64);
-        let double = |ty: Ty| self.types[ty.0 as usize] == TypeDef::Double;
         // The first field of a handle's annotation: its kind, with the UAV
         // bit; the second: the component type and count.
         let annotation = |h: V| -> Option<(i64, i64)> {
@@ -1008,12 +1086,7 @@ impl Module {
             for &i in blk.phis.iter().chain(&blk.body) {
                 let inst = &self.insts[i as usize];
                 u.int64 |= wide(inst.ty);
-                u.doubles |= double(inst.ty);
-                for_each_operand(&inst.op, |v| {
-                    let ty = self.type_of(v);
-                    u.int64 |= wide(ty);
-                    u.doubles |= double(ty);
-                });
+                for_each_operand(&inst.op, |v| u.int64 |= wide(self.type_of(v)));
                 let Op::Call(f, args) = &inst.op else {
                     continue;
                 };
@@ -1026,6 +1099,8 @@ impl Module {
                         Some((_, 0)) => u.heap_views = true,
                         _ => u.heap_samplers = true,
                     }
+                } else if name == "annotateHandle" {
+                    u.rovs |= annotation(V::Inst(i)).is_some_and(|(kind, _)| kind & 0x2000 != 0);
                 } else if name.starts_with("atomic") && name.ends_with(".i64") {
                     u.atomic64 = true;
                 } else if name.starts_with("textureLoad") || name.starts_with("bufferLoad") {
@@ -2149,98 +2224,5 @@ mod tests {
         }
         // The programs are of the wasteful kind: the passes find work.
         assert!(removed > 4000, "{removed} instructions removed");
-    }
-
-    #[test]
-    fn dead_double_clears_doubles_flag_and_validates() {
-        let mut s = crate::emit::shader::Shader::new(false);
-        s.threads = Some([1, 1, 1]);
-        let entry = s.entry;
-        let uav = s.root_uav_handle(0);
-        let f64t = s.m.double();
-        let (z, one) = (s.m.i32(0), s.m.i32(1));
-        let u = s.m.undef(s.t.i32);
-        // Dead double-precision op sets `flags::DOUBLES`, then `DEAD` removes it.
-        s.flags |= crate::emit::shader::flags::DOUBLES;
-        let _dead_f64 = s.op(entry, "makeDouble.f64", Attr::ReadNone, f64t, 101, &[z, one]);
-        // Live store so the compute shader is non-trivial.
-        let mask = s.m.i8(1);
-        let align = s.m.i32(4);
-        s.op(
-            entry,
-            "rawBufferStore.i32",
-            Attr::NoUnwind,
-            s.t.void,
-            140,
-            &[uav, z, u, one, u, u, u, mask, align],
-        );
-        s.m.terminate(entry, Term::Ret);
-        let mut dxil = s.finish();
-        // `SFI0` bit 0 (`DOUBLES`) must be clear when `DEAD` runs.
-        if crate::emit::shader_opt() & DEAD != 0 {
-            let parsed = crate::dxbc::Container::parse(&dxil).unwrap();
-            let sfi0 = parsed
-                .parts
-                .iter()
-                .find(|p| p.fourcc == crate::dxbc::FourCC::SFI0)
-                .unwrap()
-                .data;
-            let features = u64::from_le_bytes(sfi0[..8].try_into().unwrap());
-            assert_eq!(features & 0x1, 0, "stale DOUBLES flag remained in SFI0");
-        }
-        if let Ok(mut validator) = crate::emit::validator::Validator::load(None) {
-            validator
-                .validate(&mut dxil)
-                .expect("dead double shader must validate");
-        }
-    }
-
-    #[test]
-    fn two_empty_latches_from_one_branch_validate_with_dxil() {
-        let mut s = crate::emit::shader::Shader::new(false);
-        s.threads = Some([1, 1, 1]);
-        let entry = s.entry;
-        let uav = s.root_uav_handle(0);
-        let i32t = s.t.i32;
-        let (z, one, two, three) = (s.m.i32(0), s.m.i32(1), s.m.i32(2), s.m.i32(3));
-        let u = s.m.undef(i32t);
-        let head = s.m.new_block();
-        let body = s.m.new_block();
-        let latch_a = s.m.new_block();
-        let latch_b = s.m.new_block();
-        let exit = s.m.new_block();
-        s.m.terminate(entry, Term::Br(head));
-        let count = s.m.phi(head, i32t);
-        let acc = s.m.phi(head, i32t);
-        let more = s.m.cmp(head, pred::IULT, count, three);
-        s.m.terminate(head, Term::CondBr(more, body, exit));
-        let next = s.m.bin(body, Bin::Add, count, one);
-        let parity = s.m.bin(body, Bin::And, count, one);
-        let odd = s.m.cmp(body, pred::NE, parity, z);
-        // Both arms become empty `Br(head)` latches feeding distinct values into `acc`.
-        let val_a = s.m.bin(body, Bin::Add, acc, one);
-        let val_b = s.m.bin(body, Bin::Add, acc, two);
-        s.m.terminate(body, Term::CondBr(odd, latch_a, latch_b));
-        s.m.terminate(latch_a, Term::Br(head));
-        s.m.terminate(latch_b, Term::Br(head));
-        s.m.set_phi(count, vec![(z, entry), (next, latch_a), (next, latch_b)]);
-        s.m.set_phi(acc, vec![(z, entry), (val_a, latch_a), (val_b, latch_b)]);
-        let mask = s.m.i8(1);
-        let align = s.m.i32(4);
-        s.op(
-            exit,
-            "rawBufferStore.i32",
-            Attr::NoUnwind,
-            s.t.void,
-            140,
-            &[uav, z, u, acc, u, u, u, mask, align],
-        );
-        s.m.terminate(exit, Term::Ret);
-        let mut dxil = s.finish();
-        if let Ok(mut validator) = crate::emit::validator::Validator::load(None) {
-            validator
-                .validate(&mut dxil)
-                .expect("two empty latches from one CondBr must produce valid DXIL");
-        }
     }
 }

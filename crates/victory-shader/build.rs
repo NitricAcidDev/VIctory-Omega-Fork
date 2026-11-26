@@ -1,96 +1,65 @@
-//! What identifies the translator, for translations kept on disk
-//! (`emit::translation_fingerprint`, `victory-gpu`'s `shader_cache`): a hash
-//! of its sources, so a rebuild that does not change them keeps the
-//! translations, and the names of every `VICTORY_*` switch they read, whose
-//! values join the key at run time. Writes nothing but cargo directives.
+//! Fingerprint of the translator's own source, for the shader cache key
+//! (`victory-gpu`'s `shader_cache`): a rebuilt executable whose translator did
+//! not change keeps its cached translations. Also lists every `VICTORY_*`
+//! switch the translator reads, whose values join the key at run time.
+//! Reads only this crate's `src` folder; writes nothing but cargo directives.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Two FNV-1a hashes with different starts: not against anyone's will, only
-/// to tell one set of sources from the next.
-struct Hash(u64, u64);
-
-impl Hash {
-    fn add(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
-            self.1 = (self.1.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        }
-        // Where one part ends and the next begins.
-        self.0 = (self.0 ^ bytes.len() as u64).wrapping_mul(0x100_0000_01b3);
-        self.1 = (self.1 ^ bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
-}
-
-fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir).expect("the crate's sources");
-    for entry in entries {
-        let path = entry.expect("an entry of the crate's sources").path();
-        if path.is_dir() {
-            sources(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs")
-            // Test modules of their own translate nothing for a title.
-            && !path.file_name().is_some_and(|n| n.to_string_lossy().ends_with("_tests.rs"))
-        {
-            out.push(path);
+fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
         }
     }
 }
 
-/// The quoted `VICTORY_*` names in `text`.
-fn switches(text: &str, out: &mut BTreeSet<String>) {
-    let mut rest = text;
-    while let Some(at) = rest.find("\"VICTORY_") {
-        let tail = &rest[at + 1..];
-        let end = tail
-            .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-            .unwrap_or(tail.len());
-        if tail[end..].starts_with('"') {
-            out.insert(tail[..end].to_owned());
+/// FNV-1a, 64 bits, two lanes with different offsets: a mismatch only costs
+/// a cache miss, so this need not be cryptographic.
+fn fnv(state: &mut [u64; 2], bytes: &[u8]) {
+    for &b in bytes {
+        for (i, s) in state.iter_mut().enumerate() {
+            *s ^= u64::from(b) ^ (i as u64 * 0x9e);
+            *s = s.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        rest = &tail[end..];
     }
 }
 
 fn main() {
-    println!("cargo::rerun-if-changed=src");
-    println!("cargo::rerun-if-changed=build.rs");
-    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
-    let mut files = Vec::new();
-    sources(&root.join("src"), &mut files);
-    // What the translator is built with: its dependencies' versions.
-    for lock in [root.join("../../Cargo.lock"), root.join("Cargo.toml")] {
-        if lock.is_file() {
-            println!("cargo::rerun-if-changed={}", lock.display());
-            files.push(lock);
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    let mut list = Vec::new();
+    files(&src, &mut list);
+    list.sort();
+    let mut state = [0xcbf2_9ce4_8422_2325u64, 0x8422_2325_cbf2_9ce4u64];
+    let mut switches = std::collections::BTreeSet::new();
+    for p in &list {
+        let rel = p.strip_prefix(&src).unwrap_or(p).to_string_lossy().replace('\\', "/");
+        let text = std::fs::read(p).unwrap_or_default();
+        fnv(&mut state, rel.as_bytes());
+        fnv(&mut state, &(text.len() as u64).to_le_bytes());
+        fnv(&mut state, &text);
+        let s = String::from_utf8_lossy(&text);
+        let mut rest = &s[..];
+        while let Some(at) = rest.find("\"VICTORY_") {
+            let tail = &rest[at + 1..];
+            let end = tail
+                .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .unwrap_or(tail.len());
+            if tail[end..].starts_with('"') {
+                switches.insert(tail[..end].to_string());
+            }
+            rest = &tail[end..];
         }
     }
-    // The same sources give the same hash wherever they lie and whatever
-    // their line endings.
-    let mut named: Vec<(String, PathBuf)> = files
-        .into_iter()
-        .map(|f| {
-            let name = f.strip_prefix(&root).unwrap_or(&f).to_string_lossy().replace('\\', "/");
-            (name, f)
-        })
-        .collect();
-    named.sort();
-    let mut hash = Hash(0xcbf2_9ce4_8422_2325, 0x1234_5678_9abc_def0);
-    let mut names = BTreeSet::new();
-    for (name, file) in named {
-        let mut bytes = std::fs::read(&file).expect("a source of the crate");
-        bytes.retain(|&b| b != b'\r');
-        hash.add(name.as_bytes());
-        hash.add(&bytes);
-        switches(&String::from_utf8_lossy(&bytes), &mut names);
-    }
-    // And the compiler (what it folds of the float code is its own).
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    if let Ok(out) = std::process::Command::new(rustc).arg("-vV").output() {
-        hash.add(&out.stdout);
-    }
-    println!("cargo::rustc-env=VICTORY_SHADER_SOURCE_HASH={:016x}{:016x}", hash.0, hash.1);
-    let names: Vec<String> = names.into_iter().collect();
-    println!("cargo::rustc-env=VICTORY_SHADER_SWITCHES={}", names.join(","));
+    println!("cargo:rustc-env=VICTORY_SHADER_SOURCE_HASH={:016x}{:016x}", state[0], state[1]);
+    let joined: Vec<_> = switches.into_iter().collect();
+    println!("cargo:rustc-env=VICTORY_SHADER_SWITCHES={}", joined.join(","));
 }

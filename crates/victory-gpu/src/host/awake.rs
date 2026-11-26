@@ -8,8 +8,9 @@
 //!
 //! One group of 64 threads counts on a compute queue, over and
 //! over: it takes one or two of the card's few thousand wave slots, and the
-//! card is never idle. Nothing is sent once no submission has gone out for a
-//! while (a menu at 30 fps, a minimized window).
+//! card is never idle. Nothing is sent once no submission has gone out for
+//! a quarter of a second (a title that stands still; not a menu, which goes on
+//! drawing: the system's counter shows the compute queue at 100 % there too).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,8 +88,7 @@ pub(super) fn sent(device: &ID3D12Device) {
 }
 
 /// The thread that keeps the card busy; it ends when this is dropped.
-#[allow(dead_code)]
-struct Awake {
+pub(crate) struct Awake {
     stop: std::sync::Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -103,7 +103,7 @@ impl Drop for Awake {
 }
 
 /// Keeps the card of `device` busy while `wanted`.
-fn start(device: &ID3D12Device, wanted: impl Fn() -> bool + Send + 'static) -> Option<Awake> {
+pub(crate) fn start(device: &ID3D12Device, wanted: impl Fn() -> bool + Send + 'static) -> Option<Awake> {
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let (device, ended) = (device.clone(), stop.clone());
     let thread = std::thread::Builder::new()
@@ -206,16 +206,47 @@ fn run(device: &ID3D12Device, wanted: &dyn Fn() -> bool, stop: &AtomicBool) -> w
 
 #[cfg(test)]
 mod tests {
-    /// The thread keeps sending while it is wanted and stops when dropped,
-    /// and the device lives on.
+    use super::*;
+
+    /// Card memory the CPU maps holds what the CPU wrote, with the card kept
+    /// awake meanwhile; the thread ends when it is let go.
     #[test]
-    fn the_card_is_kept_busy_and_let_go() {
+    fn mapped_card_memory_is_written_by_the_cpu_and_read_by_the_card() {
         let Some(host) = crate::host::host() else {
-            return; // no host GPU
+            return;
         };
-        let awake = super::start(&host.device, || true).expect("the thread");
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        let awake = start(&host.device, || true);
+        assert!(awake.is_some());
+        let Some((buffer, data)) = host.mapped_card_buffer(4096, true) else {
+            return;
+        };
+        let (seen, back) = host.shared_buffer(4096).unwrap();
+        // SAFETY: mappings of 4096 bytes; a list, a queue and a fence of the
+        // test's own, and nothing is read before the copy has run.
+        let read = unsafe {
+            for i in 0..4096 {
+                data.add(i).write((i * 7 + i / 251) as u8);
+            }
+            let device = &host.device;
+            let queue: ID3D12CommandQueue = device
+                .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                    Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    ..Default::default()
+                })
+                .unwrap();
+            let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+            let list: ID3D12GraphicsCommandList =
+                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None).unwrap();
+            list.CopyBufferRegion(&seen, 0, &buffer, 0, 4096);
+            list.Close().unwrap();
+            queue.ExecuteCommandLists(&[Some(list.cast().unwrap())]);
+            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).unwrap();
+            queue.Signal(&fence, 1).unwrap();
+            // No event: returns when the fence is there.
+            fence.SetEventOnCompletion(1, windows::Win32::Foundation::HANDLE::default()).unwrap();
+            std::slice::from_raw_parts(back, 4096).to_vec()
+        };
+        assert!(read.iter().enumerate().all(|(i, &b)| b == (i * 7 + i / 251) as u8));
         drop(awake);
-        assert_eq!(crate::descriptor::host::device_removed(), None);
     }
 }

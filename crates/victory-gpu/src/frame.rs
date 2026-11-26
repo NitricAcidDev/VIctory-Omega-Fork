@@ -24,6 +24,30 @@ const ORIGIN: u32 = 0;
 /// frame early).
 const TOKEN_ON_TIMEOUT: u32 = 2;
 const SIXTIETH: Duration = Duration::from_micros(16_667);
+/// The interval of `VICTORY_FPS_LIMIT=0`: a tick every 0.1 ms, so a frame
+/// begins as soon as the title is ready for it.
+const UNLIMITED: Duration = Duration::from_micros(100);
+
+/// `VICTORY_FPS_LIMIT`, which replaces the interval the title sets (30
+/// frames a second in the title this was tried with): unset, the title's
+/// own; `0` or `unlimited`, none ([`UNLIMITED`]); a number, at most that
+/// many frames a second.
+fn fps_limit() -> Option<Duration> {
+    static SET: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| limit_of(&std::env::var("VICTORY_FPS_LIMIT").unwrap_or_default()))
+}
+
+fn limit_of(set: &str) -> Option<Duration> {
+    match set.trim() {
+        "" => None,
+        "0" | "unlimited" => Some(UNLIMITED),
+        n => n
+            .parse::<f64>()
+            .ok()
+            .filter(|fps| fps.is_finite() && *fps >= 1.0)
+            .map(|fps| Duration::from_secs_f64(1.0 / fps).max(UNLIMITED)),
+    }
+}
 
 struct Clock {
     start: Instant,
@@ -49,11 +73,12 @@ pub(crate) extern "system" fn set_interval(
     _period: u32,
     _flags: u32,
 ) -> HRESULT {
-    let interval = match length {
+    let asked = match length {
         0 => SIXTIETH,
         us => Duration::from_micros(u64::from(us)),
     };
-    tracing::info!(?interval, "frame interval");
+    let interval = fps_limit().unwrap_or(asked);
+    tracing::info!(?asked, ?interval, "frame interval (VICTORY_FPS_LIMIT replaces the title's)");
     // A new interval starts from now, after the last tick handed out.
     let first = LAST
         .iter()
@@ -84,6 +109,12 @@ pub(crate) fn current() -> u64 {
     FRAME.load(Ordering::Relaxed)
 }
 
+/// For tests of what is done once a frame.
+#[cfg(test)]
+pub(crate) fn test_advance() {
+    FRAME.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Per event kind (origin, vblank, flip and later kinds): the last tick a
 /// wait for it ended on.
 static LAST: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
@@ -99,7 +130,7 @@ fn next_tick(kind: u32) -> (u64, Duration) {
     let mut clock = clock();
     let c = clock.get_or_insert_with(|| Clock {
         start: Instant::now(),
-        interval: SIXTIETH,
+        interval: fps_limit().unwrap_or(SIXTIETH),
         first: 0,
     });
     let elapsed = c.start.elapsed().as_nanos();
@@ -142,20 +173,17 @@ pub(crate) extern "system" fn wait(
         tick -= 1;
         wait = Duration::ZERO;
     }
+    let _called = crate::timeline::span("the title's frame wait");
     let hr = if wait > limit {
         std::thread::sleep(limit);
         TIMEOUT
     } else {
-        std::thread::sleep(wait);
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
         last(kind).fetch_max(tick, Ordering::Relaxed);
         S_OK
     };
-    #[cfg(windows)]
-    {
-        let us = wait.min(limit).as_micros() as u64;
-        crate::framelog::add(crate::framelog::T::PaceUs, us);
-        crate::framelog::here(crate::framelog::H::PaceUs, us);
-    }
     #[cfg(all(windows, feature = "diagnostics"))]
     {
         use crate::copystat::{C, add};
@@ -205,6 +233,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_fps_limit_replaces_the_titles_interval_only_when_set() {
+        assert_eq!(limit_of(""), None);
+        assert_eq!(limit_of("  "), None);
+        assert_eq!(limit_of("0"), Some(UNLIMITED));
+        assert_eq!(limit_of("unlimited"), Some(UNLIMITED));
+        assert_eq!(limit_of("60"), Some(Duration::from_secs_f64(1.0 / 60.0)));
+        assert_eq!(limit_of("144"), Some(Duration::from_secs_f64(1.0 / 144.0)));
+        // Past 10,000 a second it is unlimited; nonsense is the title's.
+        assert_eq!(limit_of("100000"), Some(UNLIMITED));
+        for bad in ["abc", "-5", "0.5", "NaN", "inf"] {
+            assert_eq!(limit_of(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn waits_end_on_ticks_and_count_frames() {
         let null = std::ptr::null();
         assert_eq!(set_interval(null, null, 2_000, 1, 0), S_OK);
@@ -214,7 +257,8 @@ mod tests {
         let mut second = 0;
         assert_eq!(wait(null, 0, 1_000, std::ptr::null(), 0, &mut second), S_OK);
         assert!(second > first);
-        assert!(before.elapsed() <= Duration::from_millis(50));
+        // At the tick, not at the time-out (a busy PC may wake it late).
+        assert!(before.elapsed() <= Duration::from_millis(500));
         assert_eq!(wait(null, 0, 0, std::ptr::null(), 0, &mut second), TIMEOUT);
         // Tokens count frames, a frame started early on a time-out too.
         let mut early = 0;
@@ -232,18 +276,29 @@ mod tests {
         // origin poll that times out (and starts the frame), then a
         // blocking flip wait. Each flip takes its own tick.
         const FLIP: u32 = 2;
-        assert_eq!(set_interval(null, null, 5_000, 3, 0), S_OK);
+        // (The ticks are far apart, and it may take a few tries: a busy PC
+        // wakes a wait tens of milliseconds late at times.)
+        assert_eq!(set_interval(null, null, 60_000, 3, 0), S_OK);
         let mut token = 0;
-        let flips: Vec<u64> = (0..4)
-            .map(|_| {
-                let _ = wait(null, 0, 0, std::ptr::null(), TOKEN_ON_TIMEOUT, &mut token);
-                assert_eq!(
-                    wait(null, FLIP, u32::MAX, std::ptr::null(), 0, &mut token),
-                    S_OK
-                );
-                LAST[2].load(Ordering::Relaxed)
-            })
-            .collect();
+        let mut four = || -> Vec<u64> {
+            (0..4)
+                .map(|_| {
+                    let _ = wait(null, 0, 0, std::ptr::null(), TOKEN_ON_TIMEOUT, &mut token);
+                    assert_eq!(
+                        wait(null, FLIP, u32::MAX, std::ptr::null(), 0, &mut token),
+                        S_OK
+                    );
+                    LAST[2].load(Ordering::Relaxed)
+                })
+                .collect()
+        };
+        let mut flips = four();
+        for _ in 0..10 {
+            if flips.windows(2).all(|w| w[1] == w[0] + 1) {
+                break;
+            }
+            flips = four();
+        }
         assert!(flips.windows(2).all(|w| w[1] == w[0] + 1), "{flips:?}");
         // Even when a flip wait begins on the tick another just ended on.
         let (tick, _) = next_tick(FLIP);

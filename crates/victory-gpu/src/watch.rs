@@ -1389,15 +1389,81 @@ pub(crate) fn asks() -> [u64; 13] {
     std::array::from_fn(|i| ASKS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
 }
 
-/// The guards' lock, the wait for it counted.
+/// The guards' lock, the wait for it counted: for our own threads' askings
+/// and guardings, which hold it raised ([`guard_boost`]).
 #[track_caller]
-fn guards_timed() -> Held {
+fn guards_timed() -> Boosted {
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     let g = guards();
     #[cfg(feature = "diagnostics")]
     tally(7, started.elapsed().as_nanos() as u64);
-    g
+    let before = if guard_boost() { boost() } else { None };
+    Boosted { g: Some(g), before }
+}
+
+/// Whether our threads hold the guards' lock at a raised priority
+/// (`VICTORY_GUARD_BOOST=1`).
+///
+/// They hold it microseconds at a time at normal priority, and the title's
+/// threads, above it, can take their processor meanwhile; a title thread's
+/// write fault then waits for a lock whose holder does not run (13 ms at
+/// most, nearly every second of the prologue, 26 Nov). Measured in one run
+/// turn by turn (`VICTORY_AB=8,VICTORY_GUARD_BOOST`, 156 s each way): the
+/// faults' wait 8.4 -> 7.2 ms a frame, seconds with a wait over 2 ms 130 ->
+/// 115, frames shorter in 8 of 14 pairs: too little to be on by default.
+fn guard_boost() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_GUARD_BOOST").is_some_and(|v| v == "1"));
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_GUARD_BOOST") {
+        return on;
+    }
+    on
+}
+
+/// Raises this thread to time-critical; its priority before, if it was
+/// raised.
+fn boost() -> Option<i32> {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
+    // SAFETY: calls on this thread's own pseudo handle.
+    unsafe {
+        let me = GetCurrentThread();
+        let was = GetThreadPriority(me);
+        (was < THREAD_PRIORITY_TIME_CRITICAL && SetThreadPriority(me, THREAD_PRIORITY_TIME_CRITICAL) != 0).then_some(was)
+    }
+}
+
+/// [`guards_timed`]'s hold: the lock goes first, then the priority.
+struct Boosted {
+    g: Option<Held>,
+    before: Option<i32>,
+}
+
+impl std::ops::Deref for Boosted {
+    type Target = Guards;
+    fn deref(&self) -> &Guards {
+        self.g.as_ref().expect("held until dropped")
+    }
+}
+
+impl std::ops::DerefMut for Boosted {
+    fn deref_mut(&mut self) -> &mut Guards {
+        self.g.as_mut().expect("held until dropped")
+    }
+}
+
+impl Drop for Boosted {
+    fn drop(&mut self) {
+        drop(self.g.take());
+        if let Some(was) = self.before {
+            // SAFETY: this thread's own pseudo handle.
+            unsafe {
+                use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
+                SetThreadPriority(GetCurrentThread(), was);
+            }
+        }
+    }
 }
 
 /// A set of blocks, a bit each: a fault, or a look at a range of thousands of

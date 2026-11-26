@@ -89,7 +89,7 @@ said "just do it, you have permission".
 | Settings and caches | `%LOCALAPPDATA%\victory-nitric` (`light.txt` tunes the stand-in light live) |
 | Ray tracing build | `runtime\build\victory-rt-test` (a git worktree, section 6) |
 | The RX 7900 XTX fork as it is | `runtime\build\victory-xtx`, branch `xtx-base` (local) at `avatarmanz/VIctory-7900XTX` `39031cb`; exe `target-xtx\diag\victory.exe`; `Launch VIctory (7900 XTX fork).bat` starts it with its `play.ps1` settings and both renderer patches, cache `cache-7900xtx`, saves copied to `data-7900xtx`, logs `xtx-*.log`. Its 386 GPU tests pass on the RTX 5080. Replaced as the base by cool_fox (next row) |
-| cool_fox (CGBJ), the base now | `runtime\build\victory-coolfox`, branch `coolfox-speed` (local; `coolfox-base` is `f4b48ad` plus three small changes) with the 7900 XTX fork's later speed work merged in and three switches (section 5, "cool_fox"); exe `target-cf\release\victory.exe` (`victory-unchanged.exe` beside it: `f4b48ad` alone); `Launch VIctory (cool_fox).bat` starts it with the settings of its `Play-VIctory.cmd` (Series S profile), `VICTORY_NAN_SCRUB=1`, `VICTORY_FPS_LIMIT=0`, `VICTORY_AMBIENT_FLOOR=0.05`, `VICTORY_TEXTURE_DROP_MIPS=1`; cache `cache-coolfox`, saves copied to `data-coolfox`, logs `coolfox-*.log`. Remote `coolfox` = `medicthewanted/cool_fox` (a mirror) |
+| cool_fox (CGBJ), the base now | `runtime\build\victory-coolfox`, branch `coolfox-speed` (local; `coolfox-base` is `f4b48ad` plus three small changes) with the 7900 XTX fork's later speed work merged in and three switches (section 5, "cool_fox"); exe `target-cf\release\victory.exe` (`victory-unchanged.exe` beside it: `f4b48ad` alone); `Launch VIctory (cool_fox).bat` starts it with the settings of its `Play-VIctory.cmd` (Series S profile), `VICTORY_NAN_SCRUB=1`, `VICTORY_FPS_LIMIT=0`, `VICTORY_AMBIENT_FLOOR=0.05`, `VICTORY_TEXTURE_DROP_MIPS=1`, `VICTORY_LANE_CORE=1`; cache `cache-coolfox`, saves copied to `data-coolfox`, logs `coolfox-*.log`. Remote `coolfox` = `medicthewanted/cool_fox` (a mirror) |
 
 Machine: RTX 5080 16 GB (32-lane waves), 24 logical processors, 64 GB,
 Windows 11.
@@ -299,6 +299,37 @@ next submission while this one is sent (`docs/findings.md` of the fork,
 Next: that split; free roam (needs a later save or playing the prologue
 through); the 13 refused programs; the glossy, wet-looking clothes seen in
 the common room (not the decal trails: seen without them too).
+
+**Round 5 (26 Nov, 15:30-17:40), `coolfox-speed` `0ae378e`..`34c53f3`:**
+
+| Commit | What | With the title |
+|--------|------|----------------|
+| `0ae378e` | `VICTORY_NAN_SCRUB`: an infinity becomes 64,000 of its sign, not 0; NaN still 0. `TRANSLATOR_VERSION` 1 -> 2 (the cache key does not follow the translator's code: old translations would have been served) | **The banding is gone**: the "banding" was the whole picture posterized (faces, walls, the yard, from the opening cutscene on), and the owner saw the sun's reflection black. One run (diagnostics build): smooth where the five runs before were all posterized |
+| `601194a` | `VICTORY_TITLE_AFFINITY` (`all`, `spread`; unset: the title's own masks). The title pins its threads as on the console's seven cores, processors 0-13: eight workers on four cores of the 9900X, 14-23 nothing of the title's | Off: `all` measured median 25 fps, as without |
+| `34c53f3` | `VICTORY_AB=<s>,VICTORY_WIDE_SPIN` measures the refresh threads' spin in one run | See below |
+
+- Ruled out for the banding before the scrub: the 13:01 wave-wide list
+  (`VICTORY_WAVE_WIDE_ONLY=none`, own cache: still posterized), drop-mips
+  (never a one-level table), the refresh cutting (does nothing at 0), the
+  cache (two fills compared file by file: all 25,779 identical, translation
+  is deterministic). Why only some runs: an infinity had to come first.
+- In-run A/B (`VICTORY_AB=8,VICTORY_LANE_CORE,VICTORY_WIDE_SPIN`, the
+  owner playing, diagnostics build), median frame ms of five stretches:
+  neither 58.8/55.8/44.5/47.3/44.2, own core 52.2/48.1/39.6/43.8/39.9, spin
+  59.6/46.4/40.4/40.9/39.4, both 48.9/49.4/49.8/41.5/50.4. **The launcher
+  sets `VICTORY_LANE_CORE=1`** (about 10% shorter frames); spin stays off.
+- Timeline (`VICTORY_TIMELINE`, three recordings of 3 frames): the chain a
+  present comes out of is mostly the title's own busiest thread (8-9 ms a
+  frame), threads woken and not yet running (1.4-4.6 ms: ~13 cores' worth
+  of work on 12), and our faults: title threads spent 23-39 ms a frame
+  together in the guard fault handler, one fault 16.9 ms. The card ran 12-14
+  ms a frame and stood idle 13-15.
+- The frame replay (`victory replay`) of a 6.4 GB capture of the cell lost
+  the device (hung) while loading, at the first barriers, before any of the
+  title's work: not usable here yet.
+- The title can be driven without focus: `VICTORY_KEYS=<s>:Enter,...`
+  (scripted pad), and the diagnostics build saves presented frames itself
+  (`VICTORY_CAPTURE`): no keys or focus taken while the owner uses the PC.
 
 ### From the RX 7900 XTX fork
 

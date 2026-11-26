@@ -1390,7 +1390,8 @@ pub(crate) fn asks() -> [u64; 13] {
 }
 
 /// The guards' lock, the wait for it counted.
-fn guards_timed() -> std::sync::MutexGuard<'static, Guards> {
+#[track_caller]
+fn guards_timed() -> Held {
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     let g = guards();
@@ -1609,11 +1610,150 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
     opened: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
 });
 
-fn guards() -> std::sync::MutexGuard<'static, Guards> {
+#[cfg(not(feature = "diagnostics"))]
+fn guards() -> Held {
     if let Ok(g) = GUARDS.try_lock() {
         return g;
     }
-    waited(3, || GUARDS.lock().unwrap_or_else(|e| e.into_inner()))
+    waited(3, take_guards)
+}
+
+/// How long a thread that finds the guards' lock held stays awake asking
+/// for it again before it sleeps for it (`VICTORY_GUARD_SPIN`, microseconds;
+/// 200 unless given; 0: sleeps at once, as before).
+///
+/// The lock is held a few microseconds at a time, about 6 ms of a 42 ms
+/// frame in all, yet the title's write faults waited 33 ms a frame for it
+/// together, one of them 7 ms (RTX 5080, 9900X, the prologue, 26 Nov):
+/// a thread put to sleep for it is woken when it is free, and with every
+/// processor busy a woken thread runs only milliseconds later, while the
+/// others queue behind it. Such pauses of the title's threads also widen
+/// the title's own races: the game ended outdoors on one (a room number
+/// read after the interior it belonged to had changed).
+///
+/// Measured in one run turn by turn (`VICTORY_AB=8,VICTORY_GUARD_SPIN`, 156
+/// s each way): the faults' wait 30.3 -> 10.6 ms a frame, frames about 1 ms
+/// shorter in 11 of 12 pairs. The longest waits (13 ms, a holder that was
+/// not running) stay.
+fn guard_spin() -> u64 {
+    const DEFAULT: u64 = 200;
+    static US: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let us = *US.get_or_init(|| std::env::var("VICTORY_GUARD_SPIN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT));
+    #[cfg(feature = "diagnostics")]
+    let us = match crate::ab::pick("VICTORY_GUARD_SPIN") {
+        Some(true) if us == 0 => DEFAULT,
+        Some(true) => us,
+        Some(false) => 0,
+        None => us,
+    };
+    us
+}
+
+/// The guards' lock after a first try failed: asked for awake for
+/// [`guard_spin`], then waited for asleep.
+fn take_guards() -> std::sync::MutexGuard<'static, Guards> {
+    let most = guard_spin();
+    if most > 0 {
+        let began = std::time::Instant::now();
+        loop {
+            for _ in 0..32 {
+                std::hint::spin_loop();
+            }
+            if let Ok(g) = GUARDS.try_lock() {
+                return g;
+            }
+            if began.elapsed().as_micros() as u64 >= most {
+                break;
+            }
+        }
+    }
+    GUARDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The guards' lock as held.
+#[cfg(not(feature = "diagnostics"))]
+type Held = std::sync::MutexGuard<'static, Guards>;
+
+/// The guards' lock as held, with where it was taken and when, for
+/// [`held_line`].
+#[cfg(feature = "diagnostics")]
+struct Held {
+    g: std::sync::MutexGuard<'static, Guards>,
+    at: &'static std::panic::Location<'static>,
+    since: std::time::Instant,
+    waited: u64,
+}
+
+#[cfg(feature = "diagnostics")]
+impl std::ops::Deref for Held {
+    type Target = Guards;
+    fn deref(&self) -> &Guards {
+        &self.g
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+impl std::ops::DerefMut for Held {
+    fn deref_mut(&mut self) -> &mut Guards {
+        &mut self.g
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+impl Drop for Held {
+    fn drop(&mut self) {
+        let held = self.since.elapsed().as_nanos() as u64;
+        let mut all = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        let e = all.entry((self.at.file(), self.at.line())).or_default();
+        e[0] += 1;
+        e[1] += held;
+        e[2] = e[2].max(held);
+        e[3] += self.waited;
+        e[4] = e[4].max(self.waited);
+    }
+}
+
+/// Per place the guards' lock is taken: times, nanoseconds held, the
+/// longest hold, nanoseconds waited for it, the longest wait.
+#[cfg(feature = "diagnostics")]
+static HELD: Mutex<BTreeMap<(&'static str, u32), [u64; 5]>> = Mutex::new(BTreeMap::new());
+
+#[cfg(feature = "diagnostics")]
+#[track_caller]
+fn guards() -> Held {
+    let at = std::panic::Location::caller();
+    let began = std::time::Instant::now();
+    let g = match GUARDS.try_lock() {
+        Ok(g) => g,
+        Err(_) => waited(3, take_guards),
+    };
+    let since = std::time::Instant::now();
+    Held { g, at, since, waited: (since - began).as_nanos() as u64 }
+}
+
+/// The places that held the guards' lock longest since the last line, per
+/// frame: for the frame-rate line.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn held_line(frames: f64) {
+    let all = std::mem::take(&mut *HELD.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut by: Vec<_> = all.into_iter().collect();
+    by.sort_by_key(|(_, e)| std::cmp::Reverse(e[1]));
+    let text: Vec<String> = by
+        .iter()
+        .take(10)
+        .map(|((file, line), e)| {
+            let file = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            format!(
+                "{file}:{line} {:.0}x held {:.2} ms (longest {:.2}) waited {:.2} ms (longest {:.2})",
+                e[0] as f64 / frames,
+                e[1] as f64 / 1e6 / frames,
+                e[2] as f64 / 1e6,
+                e[3] as f64 / 1e6 / frames,
+                e[4] as f64 / 1e6
+            )
+        })
+        .collect();
+    tracing::info!(target: "victory_gpu::host", "the guards' lock per frame, by where it was taken: {}", text.join("; "));
 }
 
 /// The 4 KiB pages of title memory that what shaders wrote was put into,
@@ -2710,7 +2850,8 @@ fn allocation_end(at: usize, inside: usize) -> usize {
 
 /// Tells what keeps track of what title memory shows; the guards, with no
 /// block of the range known unmapped.
-fn title_memory_changed(at: usize, len: usize) -> std::sync::MutexGuard<'static, Guards> {
+#[track_caller]
+fn title_memory_changed(at: usize, len: usize) -> Held {
     // A placed texture there arrives, goes or changes with no descriptor
     // written.
     crate::descriptor::host::remapped(at, len);

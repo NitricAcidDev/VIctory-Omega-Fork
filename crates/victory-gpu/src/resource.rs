@@ -1766,14 +1766,112 @@ fn texture_floor_bytes(vram_budget: Option<u64>) -> u64 {
 }
 
 /// Whether more host copies of textures the title fills may be made for
-/// shaders that pick textures by index (`draw.rs` `heap_textures`): always
-/// up to [`texture_floor_bytes`] bytes of them, beyond that while the card's
-/// memory in use by this process is under nine tenths of the budget the system
-/// gives it ([`room_percent`] says another share; `VICTORY_TEXTURE_BUDGET_MB`
-/// sets a limit on those copies' bytes instead). Past the budget the system moves the card's memory into the PC's,
-/// which ended runs 20 and 24.
+/// shaders that pick textures by index (`draw.rs` `heap_textures`): while
+/// the card has room ([`card_room`]) or, with `VICTORY_TEXTURE_SPILL`, the
+/// PC's memory that the card reads does ([`shared_room`]).
 #[cfg(windows)]
 pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
+    card_room(memory) || (spill() != Spill::Off && shared_room(memory))
+}
+
+/// Where the host copies of textures the title fills are made
+/// (`VICTORY_TEXTURE_SPILL`): the card's own memory (unset, `0`); the PC's,
+/// which the card reads over the bus, once the card has no room (`1`);
+/// always the PC's (`all`). Slower for the card to read than its own; but a
+/// texture that waits for room is not there at all (faces, heads, walls
+/// left out on a full 16 GB card). Targets and anything the card writes
+/// stay on the card. (After this repository's `primary` 4237574, itself
+/// after fxceless/victory-gta6 pull request 601.)
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spill {
+    Off,
+    Full,
+    All,
+}
+
+#[cfg(windows)]
+fn spill_of(set: Option<&str>) -> Spill {
+    match set.map(str::trim) {
+        Some("1") => Spill::Full,
+        Some("all") => Spill::All,
+        _ => Spill::Off,
+    }
+}
+
+#[cfg(windows)]
+fn spill() -> Spill {
+    static SPILL: std::sync::OnceLock<Spill> = std::sync::OnceLock::new();
+    *SPILL.get_or_init(|| spill_of(std::env::var("VICTORY_TEXTURE_SPILL").ok().as_deref()))
+}
+
+/// Whether the PC's memory that the card reaches has room for textures: up
+/// to `VICTORY_TEXTURE_SPILL_PERCENT` (60, 10 to 90) of what the system
+/// lets this process share with the card; the rest for copies of title
+/// buffers and the system's own.
+#[cfg(windows)]
+fn shared_room(memory: Option<[u64; 4]>) -> bool {
+    static PERCENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let percent = *PERCENT.get_or_init(|| {
+        std::env::var("VICTORY_TEXTURE_SPILL_PERCENT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(60, |p| p.clamp(10, 90))
+    });
+    match memory {
+        Some([.., budget, used]) => used < budget / 100 * percent,
+        None => false,
+    }
+}
+
+/// Whether a host copy of a texture the title fills, made now, goes to the
+/// PC's memory ([`Spill`]).
+#[cfg(windows)]
+fn spills_now() -> bool {
+    let spills = match spill() {
+        Spill::Off => return false,
+        Spill::Full => !room_lately() && shared_room(crate::host::host().and_then(|h| h.video_memory())),
+        Spill::All => shared_room(crate::host::host().and_then(|h| h.video_memory())),
+    };
+    if spills {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::info!(
+                mode = ?spill(),
+                "textures are made in the PC's memory, which the card reads over the bus, from here on while the card has no room (VICTORY_TEXTURE_SPILL)"
+            );
+        });
+    }
+    spills
+}
+
+/// Textures made in the PC's memory since the start, and their bytes.
+#[cfg(windows)]
+pub(crate) static SPILLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// A heap in the PC's memory that the card reads and writes over the bus
+/// and the CPU does not see, so that textures in it have the card's own
+/// layout.
+#[cfg(windows)]
+pub(crate) fn shared_heap() -> windows::Win32::Graphics::Direct3D12::D3D12_HEAP_PROPERTIES {
+    use windows::Win32::Graphics::Direct3D12::*;
+    D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_CUSTOM,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_L0,
+        ..Default::default()
+    }
+}
+
+/// Whether the card's own memory has room for more host copies of textures
+/// the title fills: always up to [`texture_floor_bytes`] bytes of them,
+/// beyond that while the card's memory in use by this process is under nine
+/// tenths of the budget the system gives it ([`room_percent`] says another
+/// share; `VICTORY_TEXTURE_BUDGET_MB` sets a limit on those copies' bytes
+/// instead). Past the budget the system moves the card's memory into the
+/// PC's, which ended runs 20 and 24.
+#[cfg(windows)]
+fn card_room(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     const WITHOUT_BUDGET: u64 = 4 << 30;
     static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
@@ -1836,8 +1934,8 @@ pub(crate) fn targets_room_kept() -> u64 {
     most.saturating_sub(targets)
 }
 
-/// [`room`] as it was at most a tenth of a second ago, for a question
-/// asked of many textures a frame ([`room`] asks the system each time).
+/// [`card_room`] as it was at most a tenth of a second ago, for a question
+/// asked of many textures a frame ([`card_room`] asks the system each time).
 #[cfg(windows)]
 pub(crate) fn room_lately() -> bool {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1849,7 +1947,7 @@ pub(crate) fn room_lately() -> bool {
     if last >> 1 == tenth {
         return last & 1 != 0;
     }
-    let room = room(crate::host::host().and_then(|h| h.video_memory()));
+    let room = card_room(crate::host::host().and_then(|h| h.video_memory()));
     LAST.store((tenth << 1) | u64::from(room), Relaxed);
     room
 }
@@ -2574,14 +2672,23 @@ fn host_texture_as(
         }
         value
     });
-    let heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_DEFAULT,
-        ..Default::default()
+    // A texture the title fills goes to the PC's memory when the card is
+    // full (`VICTORY_TEXTURE_SPILL`, [`spills_now`]): made there on its own,
+    // not cut from a block of the card's.
+    let spills = !reserved && fills(desc) && d.sample_count <= 1 && spills_now();
+    let heap = if spills {
+        shared_heap()
+    } else {
+        D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            ..Default::default()
+        }
     };
     // A texture the title fills, whose every subresource is uploaded before
     // anything reads it: cut from a block (what the piece held before shows
     // in no texel).
-    if fills(desc)
+    if !spills
+        && fills(desc)
         && d.sample_count <= 1
         && clear_value.is_none()
         && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
@@ -2616,20 +2723,44 @@ fn host_texture_as(
             )
         }
     } else {
-        // SAFETY: the description has the host layout (checked size, same
-        // fields); the out pointer is ours.
-        unsafe {
-            host.device.CreateCommittedResource(
-                &heap,
-                crate::host::not_resident(),
-                (&raw const d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
-                // The same layout: format, then color or depth and stencil.
-                clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
-                &mut texture,
-            )
+        let committed = |heap: &D3D12_HEAP_PROPERTIES, texture: &mut Option<ID3D12Resource>| {
+            // SAFETY: the description has the host layout (checked size, same
+            // fields); the out pointer is ours.
+            unsafe {
+                host.device.CreateCommittedResource(
+                    heap,
+                    crate::host::not_resident(),
+                    (&raw const d).cast(),
+                    D3D12_RESOURCE_STATES(
+                        crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
+                    ),
+                    // The same layout: format, then color or depth and stencil.
+                    clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
+                    texture,
+                )
+            }
+        };
+        let made = committed(&heap, &mut texture);
+        match (&made, spills) {
+            (Ok(()), true) => {
+                use std::sync::atomic::Ordering::Relaxed;
+                // SAFETY: a plain question about a host description.
+                let bytes = unsafe { host.device.GetResourceAllocationInfo(0, &[(&raw const d).cast::<D3D12_RESOURCE_DESC>().read()]) }.SizeInBytes;
+                let n = SPILLED[0].fetch_add(1, Relaxed) + 1;
+                let all = SPILLED[1].fetch_add(bytes, Relaxed) + bytes;
+                if n.is_power_of_two() || n % 2000 == 0 {
+                    tracing::info!("textures made in the PC's memory since the start (VICTORY_TEXTURE_SPILL): {n}, {} MB", all >> 20);
+                }
+                made
+            }
+            // The host would not make it there: on the card, as any other.
+            (Err(e), true) => {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| tracing::warn!(error = %e, "a texture could not be made in the PC's memory; made on the card"));
+                texture = None;
+                committed(&D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }, &mut texture)
+            }
+            _ => made,
         }
     };
     if let Err(e) = &made {
@@ -4998,5 +5129,85 @@ float4 lit() : SV_Target { return 1.0; }
         let d = unsafe { more.texture.GetDesc() };
         assert_eq!((more.base, d.Width, d.MipLevels), (0, 256, 9));
         assert!(more.serial != copy.serial && more.grown.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn spill_settings_and_the_pcs_room() {
+        assert_eq!(spill_of(None), Spill::Off);
+        assert_eq!(spill_of(Some("0")), Spill::Off);
+        assert_eq!(spill_of(Some("1")), Spill::Full);
+        assert_eq!(spill_of(Some(" all ")), Spill::All);
+        assert_eq!(spill_of(Some("yes")), Spill::Off);
+        const G: u64 = 1 << 30;
+        assert!(!shared_room(None));
+        // 60 % of a 31 GB share: room under 18.6 GB in use, none above.
+        assert!(shared_room(Some([16 * G, 15 * G, 31 * G, 10 * G])));
+        assert!(!shared_room(Some([16 * G, 1 * G, 31 * G, 19 * G])));
+    }
+
+    /// A texture is made in the PC's memory as the run makes one there
+    /// (`host_texture_as`: the shared heap, made not resident and then
+    /// waited for), and filled and read back by the card with its texels.
+    #[test]
+    fn a_texture_made_in_the_pcs_memory_keeps_its_texels() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::*;
+        let Some(host) = crate::host::host() else { return };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: 256,
+            Height: 256,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            ..Default::default()
+        };
+        let mut texture: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation; the out pointer is ours.
+        unsafe {
+            host.device
+                .CreateCommittedResource(&shared_heap(), crate::host::not_resident(), &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut texture)
+                .expect("a texture in the PC's memory");
+        }
+        let texture = texture.unwrap();
+        crate::host::resident(&host.device, &texture).and_then(|()| crate::host::mapped(&host.device)).expect("resident");
+        // Up from a buffer and back into another, through the card.
+        const PITCH: u32 = 256 * 4;
+        let bytes = u64::from(PITCH) * 256;
+        let Some((up, up_ptr)) = host.shared_buffer(bytes) else { return };
+        let Some((back, back_ptr)) = host.shared_buffer(bytes) else { return };
+        let texels: Vec<u8> = (0..bytes as usize).map(|i| (i * 7 + i / 1024) as u8).collect();
+        // SAFETY: mapped buffers of these sizes; nothing runs yet.
+        unsafe { std::ptr::copy_nonoverlapping(texels.as_ptr(), up_ptr, bytes as usize) };
+        let Ok(list) = host.new_list() else { return };
+        let footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+            Offset: 0,
+            Footprint: D3D12_SUBRESOURCE_FOOTPRINT { Format: DXGI_FORMAT_R8G8B8A8_UNORM, Width: 256, Height: 256, Depth: 1, RowPitch: PITCH },
+        };
+        let at = |buffer: &ID3D12Resource| D3D12_TEXTURE_COPY_LOCATION {
+            // SAFETY: a borrowed pointer the location never releases.
+            pResource: unsafe { std::mem::transmute_copy(buffer) },
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: footprint },
+        };
+        let sub = D3D12_TEXTURE_COPY_LOCATION {
+            // SAFETY: as above.
+            pResource: unsafe { std::mem::transmute_copy(&texture) },
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+        };
+        // SAFETY: an open list; live resources in the states named.
+        unsafe {
+            list.list.CopyTextureRegion(&sub, 0, 0, 0, &at(&up), None);
+            list.list.ResourceBarrier(&[crate::host::transition(&texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+            list.list.CopyTextureRegion(&at(&back), 0, 0, 0, &sub, None);
+        }
+        list.close();
+        host.execute(&[&list]);
+        // SAFETY: the list has run; a mapped buffer of this size.
+        let read = unsafe { std::slice::from_raw_parts(back_ptr, bytes as usize) };
+        assert!(read == &texels[..], "the texels came back changed");
+        assert_eq!(crate::descriptor::host::device_removed(), None);
     }
 }

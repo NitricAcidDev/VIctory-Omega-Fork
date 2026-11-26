@@ -81,7 +81,7 @@ said "just do it, you have permission".
 | Checkout | `runtime\build\victory-render-test`, branch `primary` |
 | Build environment | `runtime\build\victory-env.sh` (Git Bash: `. victory-env.sh`, gives `$CARGO`) |
 | The exe the launchers start | `target-v2\diag\victory.exe`; the one before: `victory-25004ee.exe` |
-| Launchers | `runtime\build\Launch VIctory*.bat`, outside Git |
+| Launchers | `runtime\build`, outside Git: `Launch VIctory.bat`, `(ray tracing test)`, `(safe, to compare)`. Every other one is in `runtime\build\Other launchers`, with a `README.txt` |
 | Logs | `%LOCALAPPDATA%\victory-nitric\logs\launch-*.log` (strip the colour codes) |
 | Settings and caches | `%LOCALAPPDATA%\victory-nitric` (`light.txt` tunes the stand-in light live) |
 | Ray tracing build | `runtime\build\victory-rt-test` (a git worktree, section 6) |

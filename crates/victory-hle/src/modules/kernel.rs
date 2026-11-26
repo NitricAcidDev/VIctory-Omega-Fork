@@ -434,6 +434,128 @@ pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> 
     unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
 }
 
+/// Where the title's threads may run (`VICTORY_TITLE_AFFINITY`).
+///
+/// The title places its threads as on the console, whose seven cores it
+/// numbers 0 to 13, two hardware threads a core. On a PC that kept all of
+/// them on its first seven cores: on a Ryzen 9 9900X (12 cores, 24
+/// threads, 26 Nov) eight of its workers shared processors 0-7 (four
+/// cores), eleven more 8-12, its busiest thread 0-13, while our forty
+/// threads ran on every processor, those seven cores too, and processors
+/// 14-23 ran nothing of the title's. Its frames waited for its own
+/// threads, often woken and not yet running. With every processor for all
+/// of them (`all`) the prologue ran as fast as before (median 25 fps both),
+/// so the title's own placement stays the default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    /// As the title sets them (the default).
+    AsSet,
+    /// Every processor of the process (`all`).
+    All,
+    /// Each console core's threads on its share of the PC's cores, both
+    /// hardware threads of each (`spread`).
+    Spread,
+}
+
+fn placement_of(value: Option<&str>) -> Placement {
+    match value.map(str::trim) {
+        Some("all" | "1") => Placement::All,
+        Some("spread") => Placement::Spread,
+        _ => Placement::AsSet,
+    }
+}
+
+fn placement() -> Placement {
+    static HOW: std::sync::OnceLock<Placement> = std::sync::OnceLock::new();
+    *HOW.get_or_init(|| {
+        let how = placement_of(std::env::var("VICTORY_TITLE_AFFINITY").ok().as_deref());
+        tracing::info!(?how, "where the title's threads run (VICTORY_TITLE_AFFINITY: unset as it sets them, all, spread)");
+        how
+    })
+}
+
+/// The cores the title's masks name: seven, two hardware threads each.
+const CONSOLE_CORES: usize = 7;
+
+/// The processors a title thread gets for the console's `asked`: `process`
+/// is the process's own (0: not known), `cores` the PC's cores in order,
+/// each as the mask of its processors.
+fn title_mask(asked: usize, how: Placement, process: usize, cores: &[usize]) -> usize {
+    let mask = match how {
+        Placement::AsSet => return asked,
+        Placement::All => process,
+        Placement::Spread if cores.len() > CONSOLE_CORES => {
+            let n = cores.len();
+            let mut mask = 0;
+            for bit in (0..usize::BITS as usize).filter(|&b| asked >> b & 1 != 0) {
+                let core = bit / 2;
+                if core >= CONSOLE_CORES {
+                    mask |= 1 << bit;
+                    continue;
+                }
+                for c in &cores[core * n / CONSOLE_CORES..(core + 1) * n / CONSOLE_CORES] {
+                    mask |= c;
+                }
+            }
+            if process == 0 { mask } else { mask & process }
+        }
+        Placement::Spread => asked,
+    };
+    if mask == 0 { asked } else { mask }
+}
+
+/// The PC's cores (group 0) in order, each as the mask of its processors.
+fn host_cores() -> &'static [usize] {
+    static CORES: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    CORES.get_or_init(|| {
+        use windows_sys::Win32::System::SystemInformation::{
+            GetLogicalProcessorInformation, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION,
+        };
+        let mut bytes = 0u32;
+        // SAFETY: a size query.
+        unsafe { GetLogicalProcessorInformation(std::ptr::null_mut(), &mut bytes) };
+        let n = bytes as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
+        let mut all: Vec<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> = (0..n).map(|_| Default::default()).collect();
+        // SAFETY: a buffer of the size asked for.
+        if n == 0 || unsafe { GetLogicalProcessorInformation(all.as_mut_ptr(), &mut bytes) } == 0 {
+            return Vec::new();
+        }
+        let mut cores: Vec<usize> = all
+            .iter()
+            .filter(|i| i.Relationship == RelationProcessorCore)
+            .map(|i| i.ProcessorMask)
+            .collect();
+        cores.sort_unstable_by_key(|m| m.trailing_zeros());
+        cores
+    })
+}
+
+/// [`Placement`]: the title's mask, widened.
+pub extern "system" fn SetThreadGroupAffinity(
+    thread: *mut c_void,
+    affinity: *const windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY,
+    previous: *mut windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY,
+) -> i32 {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+    let how = placement();
+    if affinity.is_null() || how == Placement::AsSet {
+        // SAFETY: as the title passes them.
+        return unsafe { windows_sys::Win32::System::Threading::SetThreadGroupAffinity(thread, affinity, previous) };
+    }
+    // SAFETY: the title passes a readable record.
+    let mut given = unsafe { *affinity };
+    if given.Group == 0 {
+        let (mut process, mut system) = (0usize, 0usize);
+        // SAFETY: plain out values.
+        if unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) } == 0 {
+            process = 0;
+        }
+        given.Mask = title_mask(given.Mask, how, process, host_cores());
+    }
+    // SAFETY: our copy, and the title's out record.
+    unsafe { windows_sys::Win32::System::Threading::SetThreadGroupAffinity(thread, &given, previous) }
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -442,6 +564,7 @@ pub(crate) fn module() -> HleModule {
             "kernelbase.dll",
             "api-ms-win-core-libraryloader-*",
             "api-ms-win-core-processthreads-*",
+            "api-ms-win-core-processtopology-*",
             "api-ms-win-core-debug-*",
             "api-ms-win-core-errorhandling-*",
             "api-ms-win-crt-runtime-*",
@@ -469,6 +592,7 @@ pub(crate) fn module() -> HleModule {
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
             hle_export!(SetThreadPriority),
+            hle_export!(SetThreadGroupAffinity),
         ],
     }
 }
@@ -696,6 +820,61 @@ mod tests {
             assert_eq!(SetThreadPriority(thread, -15), 1);
             // SAFETY: as above.
             assert_eq!(unsafe { GetThreadPriority(thread) }, -1);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The console's masks on a PC of twelve cores of two threads each.
+    #[test]
+    fn title_threads_are_placed_over_the_pcs_cores() {
+        assert_eq!(placement_of(None), Placement::AsSet);
+        assert_eq!(placement_of(Some("0")), Placement::AsSet);
+        assert_eq!(placement_of(Some("all")), Placement::All);
+        assert_eq!(placement_of(Some(" spread ")), Placement::Spread);
+        let cores: Vec<usize> = (0..12).map(|c| 0b11 << (2 * c)).collect();
+        let process = (1 << 24) - 1;
+        // As set, and all of the process's.
+        assert_eq!(title_mask(0xff, Placement::AsSet, process, &cores), 0xff);
+        assert_eq!(title_mask(0xff, Placement::All, process, &cores), process);
+        assert_eq!(title_mask(0x2000, Placement::All, 0, &cores), 0x2000);
+        // Spread: console core c takes the PC's cores c*12/7 .. (c+1)*12/7.
+        assert_eq!(title_mask(0b01, Placement::Spread, process, &cores), 0b11);
+        assert_eq!(title_mask(0b10, Placement::Spread, process, &cores), 0b11);
+        assert_eq!(title_mask(0b100, Placement::Spread, process, &cores), 0b1111 << 2);
+        assert_eq!(title_mask(0xff, Placement::Spread, process, &cores), 0xfff);
+        assert_eq!(title_mask(0x3fff, Placement::Spread, process, &cores), process);
+        assert_eq!(title_mask(0x2000, Placement::Spread, process, &cores), 0b1111 << 20);
+        // Inside the process's, and never nothing.
+        assert_eq!(title_mask(0x3fff, Placement::Spread, 0xff, &cores), 0xff);
+        assert_eq!(title_mask(0x2000, Placement::Spread, 0xff, &cores), 0x2000);
+        // Too few cores to spread over: as set.
+        assert_eq!(title_mask(0xff, Placement::Spread, 0xff, &cores[..4]), 0xff);
+    }
+
+    /// A thread the title puts on one processor may run on all of them.
+    #[test]
+    fn a_title_threads_mask_is_widened() {
+        use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask};
+        let (mut process, mut system) = (0usize, 0usize);
+        // SAFETY: plain out values.
+        assert_ne!(unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) }, 0);
+        assert!(!host_cores().is_empty());
+        assert_eq!(host_cores().iter().fold(0, |a, c| a | c) & process, process);
+        std::thread::spawn(move || {
+            // SAFETY: plain calls on this thread.
+            let thread = unsafe { GetCurrentThread() };
+            let one = GROUP_AFFINITY { Mask: 1, Group: 0, Reserved: [0; 3] };
+            let mut before = GROUP_AFFINITY::default();
+            assert_eq!(SetThreadGroupAffinity(thread, &one, &mut before), 1);
+            // What it has now is what the next call says was before.
+            let mut now = GROUP_AFFINITY::default();
+            assert_eq!(SetThreadGroupAffinity(thread, &before, &mut now), 1);
+            assert_eq!(now.Mask, title_mask(1, placement(), process, host_cores()));
+            if placement() == Placement::All {
+                assert_eq!(now.Mask, process);
+            }
         })
         .join()
         .unwrap();

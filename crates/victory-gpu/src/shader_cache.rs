@@ -134,6 +134,12 @@ fn build() -> [u8; 32] {
         }
         // And which clean-up passes ran over the translated code.
         bytes.extend_from_slice(&victory_shader::emit::shader_opt().to_le_bytes());
+        // And which programs take the wave-wide form ([`wave_wide_list`]).
+        bytes.extend_from_slice(b"wave-wide:");
+        for hash in wave_wide_list() {
+            bytes.extend_from_slice(hash.as_bytes());
+            bytes.push(b',');
+        }
         bytes
     });
     let mut hash = blake3::Hasher::new();
@@ -156,7 +162,7 @@ pub(crate) fn translation() -> [u8; 32] {
 pub fn precompile(container: &[u8]) -> Result<bool, String> {
     let _ = crate::host::host();
     let misses = MISSES.load(Ordering::Relaxed);
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    let translate = translate_listed;
     match CACHE.get() {
         Some(cache) => cached(cache, &build(), container, translate, true)?,
         None => translate(container)?,
@@ -168,10 +174,66 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    let translate = translate_listed;
     match CACHE.get() {
         Some(cache) => cached(cache, &build(), container, translate, refresh_in_runs()),
         None => translate(container),
+    }
+}
+
+/// A container translated, in the wave-wide form when it is on
+/// [`wave_wide_list`]; for runs and `victory shaders` alike, which share the
+/// cache.
+fn translate_listed(c: &[u8]) -> Result<HostShader, String> {
+    let hash = blake3::hash(c).to_hex();
+    let wide = wave_wide_list().iter().any(|h| hash.starts_with(h.as_str()));
+    victory_shader::emit::with_wave_wide(wide, || victory_shader::emit::translate(c)).map_err(|e| e.to_string())
+}
+
+/// The containers (by the 16-digit hash the log names shaders with, the
+/// start of their BLAKE3) whose wave64 compute programs take the wave-wide
+/// form on a card of 32-lane waves ([`victory_shader::emit::with_wave_wide`]).
+/// Each is refused on an RTX 5080 without it and translates with it
+/// (`victory translate` with `VICTORY_WAVE_WIDE=1`, 26 November): the hair's
+/// screen-space shadow masks (blocks around the hair where they were left
+/// unwritten), the GPU particles' emitters, the projected decal trails. Not
+/// the water's light (another tester saw black blocks with it in another
+/// form: fxceless #799); `all` adds those five. For every program the form
+/// once lost the card (`emit`). `VICTORY_WAVE_WIDE_ONLY`: a list of hashes in
+/// place of these, `none` for none.
+const WAVE_WIDE_DEFAULT: [&str; 15] = [
+    // shadowmask: CS_GenerateShadowMasksHairOnly_SampleHairScreenSpace, CS_GenerateShadowMasks_SampleHairScreenSpace
+    "888af37a584acf98",
+    "2889c21328c69e58",
+    // GpuParticleEmit
+    "a40ae27594631121",
+    "5e3dd99e0f067aee",
+    "407eca669212d400",
+    "57f1b81de55c2842",
+    "9fe711566bec0d0a",
+    "ae0deeafe219c15c",
+    "18d957e62926ed3e",
+    // vfx_proj_decal_trail
+    "a4cb3ce527ad8569",
+    "ffa3a7645374474b",
+    "98fef92f7a6d825e",
+    "aeac9d880daff3ba",
+    "a09f0c1fae2b5ca3",
+    "f38f83439083b9ef",
+];
+/// water_shading: CS_TransmissionVolumetrics* (`VICTORY_WAVE_WIDE_ONLY=all`).
+const WAVE_WIDE_WATER: [&str; 5] = ["926c46bab3b86bd6", "6f225b641c5b0708", "5dc3b25986622949", "a10179ab7eda0dc3", "6871d6e4b3ac9a10"];
+
+fn wave_wide_list() -> &'static [String] {
+    static LIST: OnceLock<Vec<String>> = OnceLock::new();
+    LIST.get_or_init(|| wave_wide_of(std::env::var("VICTORY_WAVE_WIDE_ONLY").ok().as_deref()))
+}
+
+fn wave_wide_of(value: Option<&str>) -> Vec<String> {
+    match value.map(str::trim) {
+        None | Some("") => WAVE_WIDE_DEFAULT.iter().map(|h| h.to_string()).collect(),
+        Some("all") => WAVE_WIDE_DEFAULT.iter().chain(&WAVE_WIDE_WATER).map(|h| h.to_string()).collect(),
+        Some(v) => v.split(',').map(|h| h.trim().to_lowercase()).filter(|h| h.len() >= 8 && h != "none").collect(),
     }
 }
 
@@ -453,6 +515,19 @@ fn decode(bytes: &[u8]) -> Option<(HostShader, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wave_wide_list_and_its_switch() {
+        let default = wave_wide_of(None);
+        assert_eq!(default.len(), 15);
+        // The hair's shadow masks are in it; the water's light is not.
+        assert!(default.iter().any(|h| h == "888af37a584acf98") && default.iter().any(|h| h == "2889c21328c69e58"));
+        assert!(!default.iter().any(|h| WAVE_WIDE_WATER.contains(&h.as_str())));
+        assert_eq!(wave_wide_of(Some(" ")), default);
+        assert_eq!(wave_wide_of(Some("all")).len(), 20);
+        assert!(wave_wide_of(Some("none")).is_empty());
+        assert_eq!(wave_wide_of(Some("888AF37A584ACF98, x")), ["888af37a584acf98"]);
+    }
 
     fn shader() -> HostShader {
         HostShader {

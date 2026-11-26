@@ -129,6 +129,23 @@ pub use shader::{
 /// The loop limit without an override: 2^20.
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
+thread_local! {
+    /// Set by [`with_wave_wide`] for the translations of this thread.
+    static WIDE_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with the wave-wide form of wave64 compute programs on a host of
+/// 32-lane waves allowed for what this thread translates in it (`on`), as
+/// `VICTORY_WAVE_WIDE=1` allows it for every program. The host names the
+/// programs (`victory-gpu` `shader_cache.rs`): for all of them it once lost
+/// the card (see `emit`).
+pub fn with_wave_wide<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    let was = WIDE_HERE.with(|w| w.replace(on));
+    let out = f();
+    WIDE_HERE.with(|w| w.set(was));
+    out
+}
+
 /// The iteration count after which a translated loop is left, per lane and
 /// per entry into the loop: [`DEFAULT_LOOP_LIMIT`].
 ///
@@ -570,7 +587,13 @@ pub fn emit(
         // lost the card in a submission of two programs that had just moved to it
         // (`ptfx_CS_lightAtlas_Sprite` and `_Trail`). The 32-lane programs' form below, which
         // has no barrier, stays on.
-        let wide_option = std::env::var_os("VICTORY_WAVE_WIDE");
+        // A program the host named ([`with_wave_wide`]) is allowed it as
+        // `VICTORY_WAVE_WIDE=1` allows every program.
+        let wide_option = if WIDE_HERE.with(std::cell::Cell::get) {
+            Some(std::ffi::OsString::from("1"))
+        } else {
+            std::env::var_os("VICTORY_WAVE_WIDE")
+        };
         // Both archived kernels use one logical wave per group and have
         // validated wave32 PSOs on RTX. Explicit policy wins.
         let scene_kernel = matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64)

@@ -407,6 +407,26 @@ fn fill_unlocked() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_FILL").is_none_or(|v| v != "0"))
 }
 
+/// Whether a changed texture read in place is copied out while title memory
+/// holds still and laid out after that (`VICTORY_DETILE_ASIDE=1`), not laid
+/// out from title memory with the hold kept.
+///
+/// The runtime remaps title memory only with the hold taken alone
+/// (`crate::watch::title_memory_reading`), so the title's streaming waits
+/// for every refresh under way; outdoors, as the world streams in, the
+/// refreshes waited 60-76 ms a frame for the runtime in turn and the card
+/// stood idle up to 140 ms a frame for want of the title's work (owner's
+/// session, 26 Nov). A copy is a fraction of the laying out.
+fn detile_aside() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_DETILE_ASIDE").is_some_and(|v| v == "1"));
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_DETILE_ASIDE") {
+        return on;
+    }
+    on
+}
+
 /// Since the last frame-rate line, with [`no_wait`]: refreshes that read
 /// through the kernel because title memory was being remapped, and those
 /// left for the next refresh because a page was not there; staging buffers
@@ -1422,6 +1442,18 @@ impl Staging {
         }
         last.hash = Some(hash);
         found_blind(last);
+        if detile_aside() {
+            // The bytes copied while title memory holds still, laid out
+            // with the runtime free to remap it.
+            return with_read(size, move |read| {
+                read.copy_from_slice(tiled);
+                drop(_mapped);
+                self.detile(read);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
+                size
+            });
+        }
         self.detile(tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);

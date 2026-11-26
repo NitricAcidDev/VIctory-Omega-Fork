@@ -275,6 +275,27 @@ step: split what one submission does over two threads in a row, ask for the
 next submission while this one is sent (`docs/findings.md` of the fork,
 "What is next"), and copy only what really changed.
 
+**Round 4 (26 Nov, 13:40-14:10):**
+
+- Dropped draws, from a diagnostics run (`target-cfdiag`): of ~340 a frame,
+  250-296 are the ray-tracing structure builder (off on purpose) and 1 the
+  refused `02384a60fda6f2d0`; a constant "592/frame being made" is a stale
+  count from loading. Not a visual fault.
+- The preparing thread, diagnostics split (ms a frame): 14.2 refreshes in 40
+  flushes of ~10,300 spans (~9,300 copy nothing), 7.8 copies in the card's
+  memory, 4.2 copies and fills, 3.5 the write watch, 3.7 planning card steps,
+  2.7 bytes under flights; threads together 16.5 ms waiting for the guards.
+- **Banding of the whole picture** (contours on walls and ceilings): in 5 of
+  8 runs after 13:00, none of 3 before, with the same build and settings
+  between a smooth and a banded run. Ruled out one by one: the hair shadow
+  masks, the stand-in light (`VICTORY_AMBIENT=0`), 8 wide threads, the
+  launcher's landing/list threads, `VICTORY_TEXTURE_NO_WAIT=0`. Log message
+  kinds do not differ between smooth and banded runs. Not found; the D3D12
+  debug layer (Windows Graphics Tools, not installed) or a frame capture is
+  the next tool.
+- The hair shadow masks are back in the wave-wide list (`b128682`): the
+  blocks around hair are gone.
+
 Next: that split; free roam (needs a later save or playing the prologue
 through); the 13 refused programs; the glossy, wet-looking clothes seen in
 the common room (not the decal trails: seen without them too).

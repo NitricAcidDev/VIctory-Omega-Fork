@@ -136,16 +136,20 @@ fn translate_listed(c: &[u8]) -> Result<HostShader, String> {
 /// (particle visibility). One of the four of fxceless/victory-gta6 pull
 /// request #823, 15 minutes on an RTX 5070.
 ///
-/// `VICTORY_WAVE_WIDE_ONLY=all` adds the other three: the two of the
-/// water's light (another tester's frames gained black blocks when they
-/// ran, in another form of them: #799) and the tiling of the screen-space
-/// reflections, with which a band of blocks along the bottom of the prison
-/// shots goes (#823), but two passes it feeds trace rays through a structure
-/// nothing builds and darken the room (an RTX 5080, issue #512; the two held
-/// back, it stayed lit: `VICTORY_SKIP_PIPELINES`). A list of hashes replaces
-/// these, `none` allows none.
-const WAVE_WIDE_DEFAULT: [&str; 1] = ["369cbe906ea72764"];
-const WAVE_WIDE_MORE: [&str; 3] = ["5dc3b25986622949", "6f225b641c5b0708", REFLECTION_TILING];
+/// And the tiling of the screen-space reflections: without it a band of
+/// blocks lies along the bottom of the prison shots (#823), and a player saw
+/// black squares with it refused (its dispatch was dropped in every frame of
+/// the log). It was held back once because two passes it feeds traced rays
+/// through a structure nothing builds and darkened the room (an RTX 5080,
+/// issue #512); those rays now hit nothing while the builder does not run
+/// (`USER_STRUCTURES`).
+///
+/// `VICTORY_WAVE_WIDE_ONLY=all` adds the two of the water's light (another
+/// tester's frames gained black blocks when they ran, in another form of
+/// them: #799). A list of hashes replaces these (`369cbe906ea72764` alone:
+/// as before the tiling), `none` allows none.
+const WAVE_WIDE_DEFAULT: [&str; 2] = ["369cbe906ea72764", REFLECTION_TILING];
+const WAVE_WIDE_MORE: [&str; 2] = ["5dc3b25986622949", "6f225b641c5b0708"];
 const REFLECTION_TILING: &str = "2cc4c197ee29e291";
 
 /// The hashes `VICTORY_WAVE_WIDE_ONLY` names.
@@ -404,6 +408,7 @@ mod tests {
         assert_eq!(listed(Some(" ")), WAVE_WIDE_DEFAULT);
         assert_eq!(listed(Some("all")).len(), 4);
         assert!(listed(Some("all")).iter().any(|h| h == REFLECTION_TILING));
+        assert!(listed(None).iter().any(|h| h == REFLECTION_TILING), "the reflection tiling runs by default");
         assert!(listed(Some("none")).is_empty());
         // Too short to be a hash: nothing (an empty entry would name all).
         assert_eq!(listed(Some("2CC4C197EE29E291,,ab")), ["2cc4c197ee29e291"]);

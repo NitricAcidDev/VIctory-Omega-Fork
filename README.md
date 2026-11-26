@@ -2,16 +2,16 @@
 
 <img src="crates/victory-gpu/assets/omega.png" alt="Victory Omega logo" width="160">
 
-## Run the codec_d Windows build
+## Run Victory Omega on Windows
 
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti is the local Windows test card. Open PowerShell in the build folder and point the launcher at your own complete Xbox dump.
 
 ```powershell
 $env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
 .\Play-VIctory.cmd pareto-residency
 ```
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+The launcher selects the Series S 1080p profile with ray tracing off. F3 toggles the performance overlay. Alt+Enter toggles borderless fullscreen. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
 
 To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
 
@@ -20,9 +20,7 @@ that runs an Xbox Series title natively on Windows from files the user supplies.
 
 ## The goal
 
-**A stable 30 fps or more without ray tracing, then as high a frame rate and as
-low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
-32 GB (later 16 GB) of RAM.
+**The first milestone is a stable 15 FPS at 1080p in story on NVIDIA GeForce RTX 50 Series, with console-like rendering.** The longer-term target is 30 FPS. Ray tracing is experimental. A warmed Series X ray-tracing run on the RTX 5060 Ti measured 2.3 FPS median indoors.
 
 The way there is **porting, not emulating**: patching the title's renderer so it
 behaves the way a PC renderer does, rather than having the layer watch and copy
@@ -35,7 +33,7 @@ lighting that is too bright or too dark when walking indoors are next in line.
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-26)
+## Upstream AMD benchmark (2026-11-26)
 
 Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
 RX 7900 XTX, the Series X profile, ray tracing off.
@@ -73,15 +71,15 @@ model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
 tools, and your own dump of the title.
 
 ```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
+git clone https://github.com/NitricAcidDev/VIctory-Omega-Fork
+cd VIctory-Omega-Fork
 copy victory.example.toml victory.toml      # then set your paths, outside this folder
 cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path of your copy's executable>
 ```
 
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+something is wrong. Use `-RayTracing` to test ray-traced indirect light. Use `-Console series-x` to select the Series X profile, which can render at 4K.
 
 Before the first run, ahead of time (both can be stopped and go on later):
 

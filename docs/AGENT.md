@@ -85,6 +85,7 @@ said "just do it, you have permission".
 | Logs | `%LOCALAPPDATA%\victory-nitric\logs\launch-*.log` (strip the colour codes) |
 | Settings and caches | `%LOCALAPPDATA%\victory-nitric` (`light.txt` tunes the stand-in light live) |
 | Ray tracing build | `runtime\build\victory-rt-test` (a git worktree, section 6) |
+| The RX 7900 XTX fork as it is | `runtime\build\victory-xtx`, branch `xtx-base` (local) at `avatarmanz/VIctory-7900XTX` `39031cb`; exe `target-xtx\diag\victory.exe`; `Launch VIctory (7900 XTX fork).bat` starts it with its `play.ps1` settings and both renderer patches, cache `cache-7900xtx`, saves copied to `data-7900xtx`, logs `xtx-*.log`. The owner asked to base the next work fully on it, with minor changes only. Its 386 GPU tests pass on the RTX 5080 |
 
 Machine: RTX 5080 16 GB (32-lane waves), 24 logical processors, 64 GB,
 Windows 11.

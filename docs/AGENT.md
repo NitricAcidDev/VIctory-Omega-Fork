@@ -246,8 +246,38 @@ A/B on NVIDIA, both renderer patches are **off** in the launcher:
 - Patch 2 alone (`VICTORY_PORT_DESCRIPTORS`): pictures posterized, view
   records "found by the fallback" late, ~2,500 draws dropped a frame.
 
-Next: free roam (not reached), the 26 refused programs (hair shadow masks
-among them), the remaining ~30 ms of preparing.
+**Round 3 (26 Nov afternoon), on `coolfox-speed`:**
+
+| Commit | What | With the title |
+|--------|------|----------------|
+| `329834b` | `VICTORY_TEXTURE_SPILL` (1/all): textures in the PC's memory when the card is full | **Off.** With 1 the game ended about a minute in, three times out of three, "a host command list did not close (parameter incorrect)". The debug layer is not installed here (Graphics Tools), so the command is not known |
+| `3c83330`, `5b73321` | A per-program wave-wide list (`emit::with_wave_wide`, `shader_cache.rs` `WAVE_WIDE_DEFAULT`, `VICTORY_WAVE_WIDE_ONLY`): 7 GPU particle emitters, 6 projected decal trails | On; walls smooth; refused on the card 26 -> 13. The two hair shadow masks (`WAVE_WIDE_SHADOWS`) took the blocks around hair away but banded every wall, two runs of two: off. Water's light off (fxceless #799) |
+| `3615e6f` | Refreshes of host copies cut in pieces for the threads (`VICTORY_REFRESH_PIECE_KB`), `VICTORY_WIDE_THREADS` | **Off / default.** Cutting: the title wrote at 0 on the loading screen, twice. 8 wide threads: banded walls |
+
+Thread settings in the launcher: `VICTORY_LAND_THREADS=6`,
+`VICTORY_THIN_THREADS=8`, wide threads at their default 6. More threads did
+not raise fps (25-26 in the cell and corridor either way).
+
+The title's unimplemented `Deserialize{Compute,Graphics}PipelineStateX`
+calls are its FSR 4 upscaler passes ("title said: FFX FSR4 ACO: ...
+falling back to NewBE"): it falls back by itself; not the faces.
+
+Pause menu (Esc) works; the only save is "(Autosave) Prologue (1%)", so no
+later part of the map was reachable. An AVG AntiTrack pop-up can take the
+foreground mid-run; the key script then stops (keys go only to the game's
+window); only its window was closed (WM_CLOSE), at the owner's word.
+
+Why not 60 fps (told to the owner): the preparing thread is ~30 ms of a
+~38 ms frame (noticing and moving ~100 MB a frame up and ~40 MB back,
+translating list calls); the card is about half busy. "Mostly in RAM" makes
+it slower (renderer patch 1: 8-9 fps). The way up is the fork's own next
+step: split what one submission does over two threads in a row, ask for the
+next submission while this one is sent (`docs/findings.md` of the fork,
+"What is next"), and copy only what really changed.
+
+Next: that split; free roam (needs a later save or playing the prologue
+through); the 13 refused programs; the glossy, wet-looking clothes seen in
+the common room (not the decal trails: seen without them too).
 
 ### From the RX 7900 XTX fork
 

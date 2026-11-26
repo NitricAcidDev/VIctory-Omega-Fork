@@ -331,6 +331,33 @@ the common room (not the decal trails: seen without them too).
   (scripted pad), and the diagnostics build saves presented frames itself
   (`VICTORY_CAPTURE`): no keys or focus taken while the owner uses the PC.
 
+**Round 6 (26 Nov, 17:40-18:20), `coolfox-speed` `c9c31c7`, `824b114`:**
+
+- **The first crash outdoors** (owner's session, 17:39, ~10 min in, first
+  time anyone got outside): the title read `[rooms + 80 * index + 0x2c]`
+  with the "current room" global at -1 (image `+0x9326b4`; the global at
+  `0x14aab8594`, set with the current interior pointer `0x14aab84f8` by the
+  function around `+0x7c0a2a`). The reader takes the interior, calls
+  something, then reads the room: a race in the title's own code with the
+  thread that left the interior. Not seen in any other log.
+- Why such races show here: our guard faults pause the title's threads. In
+  diagnostics builds every place that takes the guards' lock is now timed
+  (`watch.rs` `held_line`, once a second): held about 6 ms of a 42 ms frame
+  in all, but the title's write faults (~420 a frame) waited 30-33 ms a
+  frame for it together, up to 7-13 ms once: sleep and wake-up on a busy
+  processor, not long holds.
+- `c9c31c7`: **`VICTORY_GUARD_SPIN` (200 us by default)**: a waiter asks for
+  the lock awake before sleeping. Turn by turn (156 s each way): faults'
+  wait 30.3 -> 10.6 ms a frame, frames ~1 ms shorter in 11 of 12 pairs.
+- `824b114`: `VICTORY_GUARD_BOOST=1` (off): our holders time-critical while
+  they hold it. Faults' wait 8.4 -> 7.2 ms, stalls over 2 ms in 115 seconds
+  of 157 instead of 130; frames shorter in only 8 of 14 pairs.
+- "Never over 30 fps" is the cost, not a cap: the start screen runs at 550+
+  fps; in game the last session ranged 2-31 (mostly 10-28 outdoors).
+- The owner asked for the game muted while tests run: the scratchpad's
+  `mute.ps1` mutes victory.exe's audio session (the mixer's per-app mute);
+  `-Unmute` gives it back. Their own sessions are not muted.
+
 ### From the RX 7900 XTX fork
 
 `avatarmanz/VIctory-7900XTX` (remote `xtx`; the owner's copy is

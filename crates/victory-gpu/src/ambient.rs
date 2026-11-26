@@ -112,6 +112,20 @@ fn air() -> f32 {
     })
 }
 
+/// The least light the estimate gives any point, before the creases' shade
+/// (`VICTORY_AMBIENT_FLOOR=<level>`, in the units of `constant:<level>`;
+/// unset or 0: none). The estimate is the light visible surfaces send out,
+/// so a corridor of dark walls lit by a few lamps stays nearly black where
+/// the console's traced bounce light would lift it.
+fn floor() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| floor_of(&std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default()))
+}
+
+fn floor_of(set: &str) -> f32 {
+    set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
+}
+
 /// Strength and radius of the creases' shade.
 fn shade() -> [f32; 2] {
     static SET: OnceLock<[f32; 2]> = OnceLock::new();
@@ -137,7 +151,7 @@ const SOURCE: &str = r#"
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
-    float follow; float most; float air; float unused;
+    float follow; float most; float air; float least;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -320,6 +334,9 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
+    // VICTORY_AMBIENT_FLOOR: no point darker than the floor (shaded in
+    // creases like the rest).
+    found = max(found, float3(1.0, 0.98, 0.94) * least * open);
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
@@ -445,7 +462,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
         let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
         if *said < 4 {
             *said += 1;
-            tracing::info!(?role, size = ?views.size, level, constant, "a stand-in for the indirect light");
+            tracing::info!(?role, size = ?views.size, level, constant, floor = floor(), "a stand-in for the indirect light");
         }
     }
     list.keep(&pass.cells);
@@ -461,6 +478,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[8] = 0.04f32.to_bits();
     words[9] = 4.0f32.to_bits();
     words[10] = air().to_bits();
+    words[11] = floor().to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -509,6 +527,10 @@ mod tests {
         assert_eq!(parse("0.8"), Set::Estimate(0.8));
         assert_eq!(parse("constant:0.3"), Set::Constant(0.3));
         assert_eq!(parse("constant:nan"), Set::Off);
+        assert_eq!(floor_of(""), 0.0);
+        assert_eq!(floor_of("0.05"), 0.05);
+        assert_eq!(floor_of("-1"), 0.0);
+        assert_eq!(floor_of("nan"), 0.0);
     }
 
     #[test]

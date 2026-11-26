@@ -746,15 +746,16 @@ fn card_clock_line(frames: f64, ms: f64) {
     );
 }
 
-/// The size refreshes of host copies are cut to (`VICTORY_REFRESH_PIECE_KB`,
-/// 2,048; 0: not cut): one copy's refresh of 20 MB was one thread's work
+/// The size refreshes of host copies are cut to (`VICTORY_REFRESH_PIECE_KB`;
+/// unset or 0: not cut, the default: with 2,048 the title ended on the
+/// loading screen, writing at 0, in the owner's run of 26 November): one copy's refresh of 20 MB was one thread's work
 /// while the other threads of `crate::shadow::wide_each` waited, and the
 /// copies of a frame came to 100 MB in 13 ms on the preparing thread (RTX
 /// 5080, the prologue, 26 November).
 fn refresh_piece() -> usize {
     static PIECE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *PIECE.get_or_init(|| {
-        let kb = std::env::var("VICTORY_REFRESH_PIECE_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(2048);
+        let kb = std::env::var("VICTORY_REFRESH_PIECE_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
         // At least two blocks a piece, so that each is cut on a block.
         if kb == 0 { 0 } else { (kb << 10).max(2 * REFRESH_BLOCK) }
     })

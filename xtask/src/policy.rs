@@ -145,6 +145,14 @@ fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
 
 /// All problems with one file. Pure, for testing.
 pub fn check(path: &str, content: &[u8]) -> Vec<String> {
+    if path == "crates/victory-gpu/assets/omega.png" {
+        const PNG_256: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\x01\0\0\0\x01\0";
+        return if content.len() <= 64 * 1024 && content.starts_with(PNG_256) {
+            Vec::new()
+        } else {
+            vec!["the Omega logo must be a 256×256 PNG no larger than 64 KiB".to_owned()]
+        };
+    }
     let mut problems = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());

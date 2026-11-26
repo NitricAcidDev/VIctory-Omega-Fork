@@ -1,4 +1,6 @@
-# VIctory on an RX 7900 XTX
+# Victory Omega Fork
+
+<img src="crates/victory-gpu/assets/omega.png" alt="Victory Omega logo" width="160">
 
 ## Run the codec_d Windows build
 

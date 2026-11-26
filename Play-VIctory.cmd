@@ -9,8 +9,12 @@ if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
   exit /b 2
 )
-set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
-if not exist "%runner%" set "runner=%~dp0target\release\victory.exe"
+if defined VICTORY_RUNNER (
+  set "runner=%VICTORY_RUNNER%"
+) else (
+  set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
+  if not exist "%~dp0victory-3d-rtx-pareto-residency.exe" set "runner=%~dp0target\release\victory.exe"
+)
 if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
@@ -36,6 +40,8 @@ if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_PANEL set "VICTORY_PANEL=1"
+if not defined VICTORY_BVH_BUILDER set "VICTORY_BVH_BUILDER=0"
+if not defined VICTORY_NAN_SCRUB set "VICTORY_NAN_SCRUB=1"
 if not defined VICTORY_SYNC_FINE set "VICTORY_SYNC_FINE=1"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute

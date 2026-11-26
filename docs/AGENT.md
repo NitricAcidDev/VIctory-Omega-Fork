@@ -89,7 +89,7 @@ said "just do it, you have permission".
 | Settings and caches | `%LOCALAPPDATA%\victory-nitric` (`light.txt` tunes the stand-in light live) |
 | Ray tracing build | `runtime\build\victory-rt-test` (a git worktree, section 6) |
 | The RX 7900 XTX fork as it is | `runtime\build\victory-xtx`, branch `xtx-base` (local) at `avatarmanz/VIctory-7900XTX` `39031cb`; exe `target-xtx\diag\victory.exe`; `Launch VIctory (7900 XTX fork).bat` starts it with its `play.ps1` settings and both renderer patches, cache `cache-7900xtx`, saves copied to `data-7900xtx`, logs `xtx-*.log`. Its 386 GPU tests pass on the RTX 5080. Replaced as the base by cool_fox (next row) |
-| cool_fox (CGBJ), the base now | `runtime\build\victory-coolfox`, branch `coolfox-base` (local) at `codec-d/cool_fox` `f4b48ad` plus three small changes (section 5, "cool_fox"); exe `target-cf\release\victory.exe` (`victory-unchanged.exe` beside it: `f4b48ad` alone); `Launch VIctory (cool_fox).bat` starts it with the settings of its `Play-VIctory.cmd` (Series S profile) and `VICTORY_NAN_SCRUB=1`, cache `cache-coolfox`, saves copied to `data-coolfox`, logs `coolfox-*.log`. Remote `coolfox` = `medicthewanted/cool_fox` (a mirror) |
+| cool_fox (CGBJ), the base now | `runtime\build\victory-coolfox`, branch `coolfox-speed` (local; `coolfox-base` is `f4b48ad` plus three small changes) with the 7900 XTX fork's later speed work merged in and three switches (section 5, "cool_fox"); exe `target-cf\release\victory.exe` (`victory-unchanged.exe` beside it: `f4b48ad` alone); `Launch VIctory (cool_fox).bat` starts it with the settings of its `Play-VIctory.cmd` (Series S profile), `VICTORY_NAN_SCRUB=1`, `VICTORY_FPS_LIMIT=0`, `VICTORY_AMBIENT_FLOOR=0.05`, `VICTORY_TEXTURE_DROP_MIPS=1`; cache `cache-coolfox`, saves copied to `data-coolfox`, logs `coolfox-*.log`. Remote `coolfox` = `medicthewanted/cool_fox` (a mirror) |
 
 Machine: RTX 5080 16 GB (32-lane waves), 24 logical processors, 64 GB,
 Windows 11.
@@ -213,7 +213,41 @@ dropped: primary's per-hash wave-wide list (`shader_cache.rs`
 `VICTORY_WAVE_WIDE=1` turns it on for every program, which lost the card
 before.
 
-Not run with the title. Next: read the owner's `coolfox-*.log`.
+**Run 1 with the title (26 Nov, by Claude at the owner's request, keyboard
+stand-in pad, prologue cell to common room):** 23-24 fps median in the game
+(was 5-6 on `primary`), 30 on the start screen (the title asks for 33.3 ms
+frames). Face skin missing, far heads missing, rainbow tattoo texture,
+corridor walls near-black. Frame: 32-42 ms our preparing (copies ~100 MB,
+copying back 40-65 MB), ~0 ms waiting for the card; 16,000-17,000 textures
+waiting with the 16 GB card full.
+
+Branch `coolfox-speed` then adds (local, not pushed):
+
+| Commit | What |
+|--------|------|
+| `971cfb6` | Merge of `xtx/main` `39031cb`: the fork's ~45 later commits (renderer patches 1 and 2 off by default, `UNDER_FUSED`, `SYNC_IN_PLACE`, `SPANS_QUICK`, `SEND_OWN`, `SHOW_NEW_LATER`, view addresses, shader fixes). 4 conflicts resolved keeping both sides (see its message); no added line of either side lost |
+| `88316ee` | `VICTORY_FPS_LIMIT` (`frame.rs`: 0 = unlimited, n = cap; replaces the title's interval) and `VICTORY_AMBIENT_FLOOR` (`ambient.rs`: least light of the stand-in's estimate) |
+| `ee8a237` | `VICTORY_TEXTURE_DROP_MIPS` (miaohaixiang1-netizen `fcb4f71`, cool-fox-12gb): host copies leave out the N largest levels of big 2D textures |
+
+Tests on the RTX 5080: GPU 354, shader 291, HLE 151, loader 42, formats 41,
+core 13 pass. Shader cache refilled (25,764 translate; 26 wave64 compute
+programs still refused).
+
+**Run 2 (same route):** 25 fps median (26 in the corridor and common room,
+up to 30; the start screen 530-725 fps uncapped). **Faces and far heads
+drawn, the corridor lit, hair whole**; 6,700-8,500 textures waiting. Frame:
+30 ms preparing, copies 13 ms, copying back 12 ms. Dropped draws unchanged
+(~340 a frame), so they were not the faces: the textures were.
+
+A/B on NVIDIA, both renderer patches are **off** in the launcher:
+- Patch 1 (`VICTORY_PORT_CONSTANTS`): 8-9 fps, the card 94% busy and the
+  submitting thread waiting 85 ms a frame: the card reads the title's 185 MB
+  of constants from the PC's memory over the bus.
+- Patch 2 alone (`VICTORY_PORT_DESCRIPTORS`): pictures posterized, view
+  records "found by the fallback" late, ~2,500 draws dropped a frame.
+
+Next: free roam (not reached), the 26 refused programs (hair shadow masks
+among them), the remaining ~30 ms of preparing.
 
 ### From the RX 7900 XTX fork
 

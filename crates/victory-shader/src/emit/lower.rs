@@ -128,6 +128,12 @@ pub(super) fn lower_counted(parts: &Parts, counted: bool) -> Result<Lowered, Sha
     }
 }
 
+/// What [`Lower::scrub_nan`] makes an infinity (with its sign): finite in
+/// every float format a colour target or an image has (half floats end at
+/// 65,504, the 11- and 10-bit ones at 65,024 and 64,512: this stays finite
+/// in each).
+pub(crate) const SCRUB_MOST: f32 = 64_000.0;
+
 /// `VICTORY_NAN_SCRUB=1` (off by default): see [`Lower::scrub_nan`]. Part of
 /// the cache key (`victory-gpu/src/shader_cache.rs`).
 pub(crate) fn nan_scrub() -> bool {
@@ -3883,19 +3889,28 @@ impl<'a> Lower<'a> {
     /// upscaler spreads into black patches that stay in its history (seen on
     /// NVIDIA as black blobs on faces and in the air). Not what the console
     /// does, so it is a switch; part of the shader cache key.
+    ///
+    /// An infinity becomes the largest value [`SCRUB_MOST`] (of its sign),
+    /// not 0: the sun's reflection on glass and water overflows, and as 0
+    /// it was black (owner's runs, 26 November). Finite, it cannot make a
+    /// NaN further on (infinity minus infinity in a blur).
     fn scrub_nan(&mut self, f: V) -> V {
         if !nan_scrub() {
             return f;
         }
-        // |f| >= inf, unordered: true for NaN and for either infinity (an
-        // infinity through bloom or the exposure whitens the picture as a
-        // NaN blackens it).
         let c = self.cur;
+        // Finite values stay as they are, however large.
         let a = self.unary(6, f);
         let inf = self.s.m.f32(0x7f80_0000);
-        let bad = self.s.m.cmp(c, pred::UGE, a, inf);
+        let infinite = self.s.m.cmp(c, pred::OEQ, a, inf);
         let zero = self.s.m.f32(0);
-        self.s.m.select(c, bad, zero, f)
+        let negative = self.s.m.cmp(c, pred::OLT, f, zero);
+        let most = self.s.m.f32(SCRUB_MOST.to_bits());
+        let least = self.s.m.f32((-SCRUB_MOST).to_bits());
+        let big = self.s.m.select(c, negative, least, most);
+        let finite = self.s.m.select(c, infinite, big, f);
+        let nan = self.s.m.cmp(c, pred::UNO, f, f);
+        self.s.m.select(c, nan, zero, finite)
     }
 
     fn binary(&mut self, op: u32, a: V, b: V) -> V {

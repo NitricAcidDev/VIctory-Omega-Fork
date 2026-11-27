@@ -36,6 +36,9 @@ internal sealed class Launcher : Form
     private readonly Button play = new();
     private readonly Image logo;
     private bool launchPending;
+    private string? frameLimit;
+    private bool audioTrace;
+    private static readonly string?[] FrameLimits = [null, "15", "30", "60", "unlimited"];
 
     public Launcher()
     {
@@ -71,6 +74,8 @@ internal sealed class Launcher : Form
         layout.Controls.Add(Footer(), 0, 4);
 
         var saved = ReadSettings();
+        frameLimit = Array.IndexOf(FrameLimits, saved.FrameLimit) >= 0 ? saved.FrameLimit : null;
+        audioTrace = saved.AudioTrace;
         folder.Text = saved.Folder ?? FindLocalGame() ?? "";
         profile.SelectedIndex = saved.SeriesX ? 1 : 0;
         rays.Checked = saved.RayTracing;
@@ -186,8 +191,9 @@ internal sealed class Launcher : Form
 
     private Control Footer()
     {
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1 };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 136));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 108));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 142));
         status.Dock = DockStyle.Fill;
@@ -209,10 +215,44 @@ internal sealed class Launcher : Form
                 status.Text = "Could not open logs. " + e.Message;
             }
         };
-        footer.Controls.Add(logs, 1, 0);
-        footer.Controls.Add(play, 2, 0);
+        var trainer = MakeButton("Omega Trainer", false);
+        trainer.Click += (_, _) => ShowTrainer();
+        footer.Controls.Add(trainer, 1, 0);
+        footer.Controls.Add(logs, 2, 0);
+        footer.Controls.Add(play, 3, 0);
         AcceptButton = play;
         return footer;
+    }
+
+    private void ShowTrainer()
+    {
+        using var dialog = new Form
+        {
+            Text = "Omega Trainer", Icon = Icon, Font = Font,
+            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+            ClientSize = new Size(420, 264), BackColor = BackColor, ForeColor = Ink
+        };
+        var items = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1 };
+        items.Controls.Add(LabelFor("Omega Trainer", 21, Ink, bold: true));
+        items.Controls.Add(LabelFor("Applies on the next launch.", 10, Muted));
+        items.Controls.Add(LabelFor("Runtime frame limit", 11, Ink, bold: true));
+        var cap = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top };
+        cap.Items.AddRange(["Game default", "15 FPS", "30 FPS", "60 FPS", "Unlimited"]);
+        cap.SelectedIndex = Array.IndexOf(FrameLimits, frameLimit);
+        cap.AccessibleName = "Runtime frame limit";
+        items.Controls.Add(cap);
+        var trace = new CheckBox { Text = "Trace audio for this profile", AutoSize = true, Checked = audioTrace };
+        items.Controls.Add(trace);
+        var apply = MakeButton("Apply", true);
+        apply.DialogResult = DialogResult.OK;
+        items.Controls.Add(apply);
+        dialog.Controls.Add(items);
+        dialog.AcceptButton = apply;
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+        frameLimit = FrameLimits[cap.SelectedIndex];
+        audioTrace = trace.Checked;
     }
 
     private static TableLayoutPanel Card()
@@ -325,7 +365,7 @@ internal sealed class Launcher : Form
         {
             Directory.CreateDirectory(StateDir);
             var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
-                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked);
+                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked, frameLimit, audioTrace);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {
@@ -343,6 +383,12 @@ internal sealed class Launcher : Form
             if (selection.ShadowBoost && shadowBoost.Enabled) start.ArgumentList.Add("-ShadowBoost");
             if (selection.LowMemory) start.ArgumentList.Add("-LowMemory");
             if (selection.Diagnostics) start.ArgumentList.Add("-PerformanceLog");
+            if (selection.AudioTrace) start.ArgumentList.Add("-AudioTrace");
+            if (selection.FrameLimit is not null)
+            {
+                start.ArgumentList.Add("-FrameLimit");
+                start.ArgumentList.Add(selection.FrameLimit);
+            }
             UseLocalData(start);
             TrackRun(start);
         }
@@ -359,8 +405,8 @@ internal sealed class Launcher : Form
         status.Text = "Starting Victory Omega…";
         try
         {
-            using var stdout = File.Create(Path.Combine(StateDir, "game-stdout.log"));
-            using var stderr = File.Create(Path.Combine(StateDir, "game-stderr.log"));
+            using var stdout = new FileStream(Path.Combine(StateDir, "game-stdout.log"), FileMode.Create, FileAccess.Write, FileShare.Read);
+            using var stderr = new FileStream(Path.Combine(StateDir, "game-stderr.log"), FileMode.Create, FileAccess.Write, FileShare.Read);
             using var run = Process.Start(start) ?? throw new IOException("Could not start PowerShell.");
             await Task.WhenAll(run.StandardOutput.BaseStream.CopyToAsync(stdout),
                 run.StandardError.BaseStream.CopyToAsync(stderr), run.WaitForExitAsync());
@@ -435,5 +481,6 @@ internal sealed class Launcher : Form
     }
 
     private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false,
-        bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false);
+        bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false,
+        string? FrameLimit = null, bool AudioTrace = false);
 }

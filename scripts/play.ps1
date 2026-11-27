@@ -16,6 +16,8 @@ param(
     [switch]$LowMemory,
     [switch]$OriginalGraphics,
     [switch]$PerformanceLog,
+    [switch]$AudioTrace,
+    [ValidateSet('15', '30', '60', 'unlimited')][string]$FrameLimit,
     [string]$LegacyRoot,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
@@ -44,6 +46,11 @@ if ($LowMemory) {
     $settings.VICTORY_WINDOW_KB = '2048'
 }
 if ($PerformanceLog) { $settings.VICTORY_LOG = 'warn,victory_gpu::host=info,victory_gpu::pipeline=info,victory_gpu::ambient=info' }
+if ($AudioTrace) {
+    $log = if ($settings.VICTORY_LOG) { $settings.VICTORY_LOG } else { 'warn' }
+    $settings.VICTORY_LOG = "$log,victory_hle::modules::audio=debug,victory_hle::modules::audio::capture=warn,victory_hle::modules::apu=debug"
+}
+if ($FrameLimit) { $settings.VICTORY_FPS_LIMIT = $FrameLimit }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"

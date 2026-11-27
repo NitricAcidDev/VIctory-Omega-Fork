@@ -52,6 +52,8 @@ For a fresh NVIDIA launch, Omega Launcher applies the console, ray tracing, grap
 
 For NVIDIA shader precompilation with the selected launch profile, add `-PreloadShaders` to the command above. It uses the NVIDIA runner and its cache, then starts the game. The **Preload Shaders** action in F1 uses the same NVIDIA preloader.
 
+**Unified tuning** on Home lets the NVIDIA runner use up to 1 GiB of Resizable BAR upload memory and six draw-recording workers. It is off by default and unavailable with Low-memory mode. PowerShell users can pass `-UnifiedTuning` to `play.ps1`. To try whole-program optimization, add `-OptimizedBuild` to `Build-OmegaNvidia.ps1`. This build takes longer. See the [comparison notes](docs/performance-nvidia.md).
+
 **Water Light** controls the experimental tiled water lighting pass. It starts off in Omega Launcher because the pass can cause dark or green tiles on NVIDIA. Use it to compare the same shoreline with both settings. See the [NVIDIA settings reference](docs/nvidia-settings.md) for the other F1 options.
 
 ### ScriptHook VI trainer
@@ -62,7 +64,7 @@ Install CMake 3.24 or newer and the Visual Studio C++ build tools with MASM. Bui
 .\scripts\Build-OmegaNvidia.ps1 -TrainerGameDirectory '<Xbox game folder>'
 ```
 
-The build installs the pinned ScriptHook VI revision when the trainer files are missing. Select **Use NVIDIA runner** in Omega Launcher. In offline story gameplay, press **F4** to open the trainer. Use the arrow keys to navigate, Enter to select and Backspace to go back. In **F1**, set **Game Keyboard** to Off to stop Victory from sending keyboard input to the game and its emulated controller. This applies live. ScriptHook VI has its own keyboard handler. The trainer targets Xbox build 1.0.2.1. [ScriptHook VI](https://github.com/modpapi/scripthook-vi)
+The build installs the pinned ScriptHook VI revision when the trainer files are missing. In Omega Launcher, select **Use NVIDIA runner** on **Home**, then **Enable trainer** on **Mods**. In offline story gameplay, press **F4** to open the trainer. Use the arrow keys to navigate, Enter to select and Backspace to go back. In **F1**, set **Game Keyboard** to Off to stop Victory from sending keyboard input to the game and its emulated controller. This applies live. ScriptHook VI has its own keyboard handler. The trainer targets Xbox build 1.0.2.1. [ScriptHook VI](https://github.com/modpapi/scripthook-vi)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
@@ -176,6 +178,10 @@ commits taken from elsewhere name the commit and its author.
 - **[trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)**
   and its contributors supplied the optional NVIDIA runner, F1 graphics menu,
   and NVIDIA shader and pipeline preloader.
+- **[Keel62155/VIctoryUnified](https://github.com/Keel62155/VIctoryUnified)**
+  published the Resizable BAR and worker-count tuning results and tested the
+  whole-program build. Its notes also identified fxceless's pipeline panic
+  recovery from pull request #1353.
 - **[modpapi/ScriptHook VI](https://github.com/modpapi/scripthook-vi)** supplied
   the hosted startup interface and optional offline story trainer.
 - **[NVIDIA Streamline](https://github.com/NVIDIA-RTX/Streamline)** provides the

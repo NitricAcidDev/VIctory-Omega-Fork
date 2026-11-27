@@ -19,6 +19,9 @@ unsafe extern "system" {
 
 /// Start the locally installed ScriptHook VI using its VIctory host ABI.
 pub(super) fn start(base: usize, size: u64, exe: &Path) {
+    if std::env::var_os("VICTORY_OMEGA_TRAINER").is_none_or(|value| value != "1") {
+        return;
+    }
     let Ok(exe) = std::fs::canonicalize(exe) else { return };
     let Some(dir) = exe.parent() else { return };
     let dll = dir.join("shvi/shvi_core.dll");

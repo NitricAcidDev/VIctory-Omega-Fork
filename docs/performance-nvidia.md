@@ -44,6 +44,23 @@ and phone interactions. Correlate those interactions with voice creation,
 PCM produced, and samples consumed before deciding whether the loss is in
 XMA or later audio routing.
 
+### VIctoryUnified comparison
+
+VIctoryUnified reports 22–24 base FPS in its RTX 4060 / i7-14700F prison-cell
+test at 960×540 internal resolution, and 18–21 FPS walking at two-thirds
+scale. The scene and internal resolution differ from Omega's samples.
+[VIctoryUnified benchmark notes](https://github.com/Keel62155/VIctoryUnified/blob/e423a308c711fd50d6fd70d2b0d33ae6a097b563/PROGRESS.md)
+
+For a matched test on Omega, alternate runs with **Unified tuning** off
+and on at the same checkpoint, using Series S, ray tracing off, a warmed
+cache, and the same DLSS mode. Disable frame generation and select
+**Unlimited** so the base rate is visible. The preset asks for a 1 GiB GPU
+upload budget via Resizable BAR and six recording workers. The runner
+keeps its existing allocation fallback and VRAM-scaled buffer limits.
+Use `-More @{VICTORY_WINDOWS_BAR_MB='0'}` or
+`-More @{VICTORY_THIN_THREADS='8'}` with `play.ps1 -Nvidia -UnifiedTuning`
+to isolate either setting. Results on Omega are pending.
+
 The follow-up Series S run with audio tracing active recorded 8.9–11.9 FPS across nine late gameplay intervals. Submission preparation took 41–51 ms per frame and buffer copies uploaded 67–82 MB per frame. The pipeline backlog was clear during those intervals. In the same stretch, the mesh dispatch diagnostics recorded zero records rejected by the per-list work budget. The camera moved during the follow-up, so these ranges describe the bottleneck and do not measure the effect of the renderer changes.
 
 For a repeat, launch `scripts/play.ps1` with `-Console series-s -Build diag -PerformanceLog`, then save timings for the same fixed camera view and pan after the pipeline queue clears. Record the selected graphics profile, driver, save checkpoint, and cache state with the result.

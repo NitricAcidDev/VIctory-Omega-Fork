@@ -21,6 +21,8 @@ param(
     [switch]$Nvidia,
     [switch]$WaterLight,
     [switch]$PreloadShaders,
+    [switch]$UnifiedTuning,
+    [switch]$Trainer,
     [ValidateSet('off', 'dlaa', 'quality', 'balanced', 'performance')][string]$Dlss = 'quality',
     [ValidateSet(0, 2, 3, 4, 5, 6)][int]$FrameGeneration = 0,
     [ValidateSet('15', '30', '60', 'unlimited')][string]$FrameLimit,
@@ -29,8 +31,11 @@ param(
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
-if (!$Nvidia -and ($WaterLight -or $PreloadShaders)) {
-    throw 'Water Light and shader preload require -Nvidia.'
+if (!$Nvidia -and ($WaterLight -or $PreloadShaders -or $UnifiedTuning -or $Trainer)) {
+    throw 'Water Light, shader preload, Unified tuning and the trainer require -Nvidia.'
+}
+if ($UnifiedTuning -and $LowMemory) {
+    throw 'Unified tuning adds a GPU memory budget. Turn off Low-memory mode to use it.'
 }
 $settings = @{
     VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
@@ -119,9 +124,16 @@ if ($Nvidia) {
         VICTORY_WARMUP_RESTART = '0'
         VICTORY_TEXTURE_CATCHUP = '1'
     }
+    if ($UnifiedTuning) {
+        # VIctoryUnified's measured settings. Keep Omega's VRAM-scaled
+        # card buffer limits and NVIDIA upscaler. --set can override either value.
+        $options.VICTORY_WINDOWS_BAR_MB = '1024'
+        $options.VICTORY_THIN_THREADS = '6'
+    }
     $env:VICTORY_OMEGA_LAUNCH = ($options.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join [char]10
     $launch = @('play', $Exe)
     if ($PreloadShaders) { $launch += '--preload' }
+    if ($Trainer) { $launch += '--set', 'VICTORY_OMEGA_TRAINER=1' }
     foreach ($key in $More.Keys) { $launch += '--set', "$key=$($More[$key])" }
     try { & $victory @launch } finally { Remove-Item Env:VICTORY_OMEGA_LAUNCH }
     exit $LASTEXITCODE

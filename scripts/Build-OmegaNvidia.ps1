@@ -1,7 +1,8 @@
 # Build the NVIDIA runner with Omega window branding. The checkout and binary stay outside the repo.
 param(
     [string]$SourceDir = (Join-Path $env:LOCALAPPDATA 'victory/nvidia-source'),
-    [string]$TrainerGameDirectory
+    [string]$TrainerGameDirectory,
+    [switch]$OptimizedBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -210,6 +211,21 @@ Update-NvidiaSource 'crates/victory-gpu/src/texture.rs' {
 '@
     $text.Remove($at, $original.Length).Insert($at, $retry)
 }
+Update-NvidiaSource 'crates/victory-gpu/src/pipeline/make.rs' {
+    param($text)
+    $make = '            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());'
+    if (!$text.Contains($make)) { throw 'Could not find the NVIDIA pipeline build call.' }
+    # fxceless #1353, brought to this build via VIctoryUnified's progress notes.
+    $text.Replace($make, @'
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                HostPipeline::new(&self.shaders, self.graphics.as_deref())
+            }))
+            .unwrap_or_else(|_| {
+                tracing::warn!(pipeline = %self.key, "host pipeline build panicked");
+                None
+            });
+'@)
+}
 Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
     param($text)
     $text = $text.Replace(
@@ -361,11 +377,35 @@ $launcherOptions = {
     }
 '@)
 }
-Update-NvidiaSource 'apps/victory/src/play.rs' {
+$omegaPlaySettings = {
     param($text)
     $text = & $launcherOptions $text
     $text.Replace('    if !s.contains_key("VICTORY_WARMUP_RESTART")', '    if s.get("VICTORY_WARMUP_RESTART").is_some_and(|value| value != "0")')
-} $launcherOptions
+}
+Update-NvidiaSource 'apps/victory/src/play.rs' {
+    param($text)
+    $text = & $omegaPlaySettings $text
+    $args = '        format!("play {}{}", quoted(&exe), if o.no_framegen_ready { " --no-framegen-ready" } else { "" }),'
+    if (!$text.Contains($args)) { throw 'Could not find the NVIDIA restart arguments.' }
+    $text.Replace($args, @'
+        format!(
+            "play {}{}{}{}",
+            quoted(&exe),
+            if o.no_framegen_ready { " --no-framegen-ready" } else { "" },
+            if trainer_enabled { " --set VICTORY_OMEGA_TRAINER=1" } else { "" },
+            tuning_args,
+        ),
+'@).Replace('    s.insert("VICTORY_MENU_FILE".to_owned(),', @'
+    let trainer_enabled = s.get("VICTORY_OMEGA_TRAINER").is_some_and(|value| value == "1");
+    let mut tuning_args = String::new();
+    for name in ["VICTORY_WINDOWS_BAR_MB", "VICTORY_THIN_THREADS"] {
+        if let Some(value) = s.get(name).and_then(|value| value.parse::<u32>().ok()) {
+            tuning_args.push_str(&format!(" --set {name}={value}"));
+        }
+    }
+    s.insert("VICTORY_MENU_FILE".to_owned(),
+'@)
+} -Previous $omegaPlaySettings -PreviousHash 'FA5F79D50DBD7491B563666007F6598FC02FF97268378385166C70A514DB0B10'
 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'omega-scripthook-host.rs') -Destination (Join-Path $SourceDir 'apps/victory/src/omega_scripthook_host.rs')
 Update-NvidiaSource 'apps/victory/src/run.rs' {
@@ -376,11 +416,23 @@ Update-NvidiaSource 'apps/victory/src/run.rs' {
     $text.Replace($entry, "    omega_scripthook_host::start(image.base(), image.info().size_of_image as u64, exe);`n$entry")
 }
 
+$oldLto = $env:CARGO_PROFILE_RELEASE_LTO
+$oldCodegenUnits = $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 Push-Location $SourceDir
 try {
+    if ($OptimizedBuild) {
+        $env:CARGO_PROFILE_RELEASE_LTO = 'fat'
+        $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '1'
+    }
     cargo build --release --locked -p victory
     if ($LASTEXITCODE) { throw 'The Omega NVIDIA runner build failed.' }
-} finally { Pop-Location }
+} finally {
+    if ($OptimizedBuild) {
+        $env:CARGO_PROFILE_RELEASE_LTO = $oldLto
+        $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = $oldCodegenUnits
+    }
+    Pop-Location
+}
 
 # Install beside older builds so an active game can finish its session.
 $target = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner/omega-options-v1'

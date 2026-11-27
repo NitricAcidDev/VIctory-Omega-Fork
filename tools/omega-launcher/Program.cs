@@ -38,6 +38,9 @@ internal sealed class Launcher : Form
     private readonly CheckBox diagnostics = new();
     private readonly CheckBox audioTrace = new();
     private readonly CheckBox waterLight = new();
+    private readonly CheckBox unifiedTuning = new();
+    private readonly CheckBox trainer = new();
+    private readonly Label trainerStatus = new();
     private readonly CheckBox nvidia = new();
     private readonly ComboBox frameLimit = new();
     private readonly ComboBox dlss = new();
@@ -59,8 +62,8 @@ internal sealed class Launcher : Form
         repo = FindCheckout();
 
         Text = "Omega Launcher";
-        ClientSize = new Size(780, 720);
-        MinimumSize = SizeFromClientSize(new Size(684, 700));
+        ClientSize = new Size(780, 752);
+        MinimumSize = SizeFromClientSize(new Size(684, 732));
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(22, 16, 30);
         ForeColor = Ink;
@@ -78,7 +81,13 @@ internal sealed class Launcher : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 114));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        Controls.Add(layout);
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var home = new TabPage("Home") { BackColor = BackColor };
+        var mods = new TabPage("Mods") { BackColor = BackColor };
+        home.Controls.Add(layout);
+        mods.Controls.Add(ModsPanel());
+        tabs.TabPages.AddRange([home, mods]);
+        Controls.Add(tabs);
         layout.Controls.Add(Hero(), 0, 0);
         layout.Controls.Add(FolderCard(), 0, 1);
         layout.Controls.Add(ProfileCard(), 0, 2);
@@ -90,6 +99,8 @@ internal sealed class Launcher : Form
         frameLimit.SelectedIndex = Math.Max(0, Array.IndexOf(FrameLimits, saved.FrameLimit));
         audioTrace.Checked = saved.AudioTrace;
         waterLight.Checked = saved.WaterLight;
+        unifiedTuning.Checked = saved.UnifiedTuning;
+        trainer.Checked = saved.Trainer;
         nvidia.Checked = saved.Nvidia && NvidiaInstalled;
         dlss.SelectedIndex = Math.Max(0, Array.IndexOf(DlssModes, saved.Dlss ?? "quality"));
         frameGeneration.SelectedIndex = Math.Max(0, Array.IndexOf(FrameMultipliers, saved.FrameGeneration));
@@ -107,9 +118,28 @@ internal sealed class Launcher : Form
         profile.SelectedIndexChanged += (_, _) => RefreshStatus();
         rays.CheckedChanged += (_, _) => RefreshStatus();
         original.CheckedChanged += (_, _) => RefreshStatus();
+        memory.CheckedChanged += (_, _) => RefreshStatus();
         nvidia.CheckedChanged += (_, _) => RefreshStatus();
         dlss.SelectedIndexChanged += (_, _) => RefreshStatus();
         RefreshStatus();
+    }
+
+    private Control ModsPanel()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+            WrapContents = false, Padding = new Padding(28, 22, 28, 20)
+        };
+        panel.Controls.Add(LabelFor("ScriptHook VI", 18, Ink, bold: true));
+        trainer.Text = "Enable trainer";
+        trainer.AutoSize = true;
+        trainer.ForeColor = Ink;
+        panel.Controls.Add(trainer);
+        trainerStatus.AutoSize = true;
+        trainerStatus.ForeColor = Muted;
+        panel.Controls.Add(trainerStatus);
+        return panel;
     }
 
     private Control Hero()
@@ -230,7 +260,11 @@ internal sealed class Launcher : Form
         nvidia.Enabled = NvidiaInstalled;
         nvidia.AutoSize = true;
         card.Controls.Add(nvidia, 0, 0);
-        card.SetColumnSpan(nvidia, 3);
+        card.SetColumnSpan(nvidia, 2);
+        unifiedTuning.Text = "Unified tuning";
+        unifiedTuning.AutoSize = true;
+        unifiedTuning.AccessibleDescription = "Use six graphics recording workers and up to 1 GiB of Resizable BAR upload memory.";
+        card.Controls.Add(unifiedTuning, 2, 0);
 
         void AddChoice(ComboBox field, int column, string label, string[] values)
         {
@@ -358,6 +392,17 @@ internal sealed class Launcher : Form
     private void RefreshStatus()
     {
         waterLight.Enabled = nvidia.Checked;
+        unifiedTuning.Enabled = nvidia.Checked && !memory.Checked;
+        string? game = GamePath();
+        string? gameDirectory = game is null ? null : Path.GetDirectoryName(game);
+        trainer.Enabled = nvidia.Checked && gameDirectory is not null
+            && File.Exists(Path.Combine(gameDirectory, "shvi", "shvi_core.dll"))
+            && File.Exists(Path.Combine(gameDirectory, "shvi", "plugins", "trainer.asi"))
+            && File.Exists(Path.Combine(gameDirectory, "shvi", "natives", "1794606036.json"));
+        trainerStatus.Text = !nvidia.Checked ? "Select Use NVIDIA runner on Home."
+            : gameDirectory is null ? "Select your Xbox game folder on Home."
+            : trainer.Enabled ? "Press F4 in offline story mode."
+            : "Install ScriptHook VI with the NVIDIA build script, then reopen the launcher.";
         shadowBoost.Enabled = !nvidia.Checked && !rays.Checked && !original.Checked;
         dlss.Enabled = nvidia.Checked && !original.Checked;
         frameGeneration.Enabled = dlss.Enabled && dlss.SelectedIndex > 0;
@@ -396,7 +441,8 @@ internal sealed class Launcher : Form
             var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
                 original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked,
                 FrameLimits[frameLimit.SelectedIndex], audioTrace.Checked, nvidia.Checked,
-                DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex], waterLight.Checked);
+                DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex], waterLight.Checked,
+                unifiedTuning.Checked, trainer.Checked);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {
@@ -412,6 +458,8 @@ internal sealed class Launcher : Form
             {
                 start.ArgumentList.Add("-Nvidia");
                 if (selection.WaterLight) start.ArgumentList.Add("-WaterLight");
+                if (selection.UnifiedTuning && unifiedTuning.Enabled) start.ArgumentList.Add("-UnifiedTuning");
+                if (selection.Trainer && trainer.Enabled) start.ArgumentList.Add("-Trainer");
                 start.ArgumentList.Add("-Dlss");
                 start.ArgumentList.Add(selection.Dlss!);
                 start.ArgumentList.Add("-FrameGeneration");
@@ -523,5 +571,5 @@ internal sealed class Launcher : Form
     private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false,
         bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false,
         string? FrameLimit = null, bool AudioTrace = false, bool Nvidia = false, string? Dlss = null,
-        int FrameGeneration = 0, bool WaterLight = false);
+        int FrameGeneration = 0, bool WaterLight = false, bool UnifiedTuning = false, bool Trainer = false);
 }

@@ -5,6 +5,7 @@
 //! writes it (view creation and descriptor copies) and again when a draw
 //! reads it through a table and finds the slot changed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use windows::Win32::Graphics::Direct3D12::*;
@@ -161,24 +162,8 @@ pub(crate) struct HostHeap {
     /// waited for most (5.6 % of their time, profile waits-1: each descriptor
     /// made for a draw takes it, and lets go of what the slot held under it).
     kept: Box<[Mutex<Option<ID3D12Resource>>]>,
-    /// Where the search for free dynamic slots starts, and which are taken
-    /// (by lists not yet reset).
-    next: Mutex<(u32, Vec<bool>)>,
-    /// How many dynamic slots are free (changed under `next`'s lock): with
-    /// fewer than a table needs, the search is not made. Once the world
-    /// had taken them all, every later table of the frame searched every
-    /// slot before it was refused.
-    free: std::sync::atomic::AtomicU32,
-    /// The shortest table that found no run of free slots since slots were
-    /// last given back (changed under `next`'s lock; `u32::MAX`: none).
-    /// Until something is given back the free runs only shrink, so a table
-    /// of that length or longer is refused without the search. Enough
-    /// slots were free, but in pieces, and every such table walked the
-    /// whole ring before it was refused: 0.33 ms each with 131,072 slots,
-    /// 1.0 s of the recording threads in a frame that refused 3,143 (run
-    /// 45), under the lock all of them need. (A free run that lies across
-    /// the place the search starts from is seen by neither.)
-    too_long: std::sync::atomic::AtomicU32,
+    /// Reusable runs in the dynamic part of the heap.
+    dynamic_slots: Mutex<DynamicSlots>,
     /// View heaps: the bytes per element of the buffer view at each title
     /// slot, for shaders that pick a buffer by an index they compute
     /// (`victory_shader::emit::SLOT_STRIDES`): an upload buffer of
@@ -1464,7 +1449,9 @@ pub(crate) fn slot_story(slot: u32) -> String {
         let mut text = if index < host.count {
             format!("title slot {index}, made from {}", host.describe_slot(index).unwrap_or_default())
         } else {
-            let taken = host.next.lock().unwrap_or_else(|e| e.into_inner()).1.get((index - host.count) as usize).copied();
+            let taken = (index - host.count < host.dynamic).then(|| {
+                host.dynamic_slots.lock().unwrap_or_else(|e| e.into_inner()).taken(index - host.count)
+            });
             format!("dynamic slot {} (taken {taken:?})", index - host.count)
         };
         if twin {
@@ -1627,6 +1614,60 @@ pub(crate) fn probe_view_limit() {
 /// table past them is made afresh in these slots like any other.
 pub(crate) const DYNAMIC: u32 = 1 << 18;
 
+/// Free runs indexed by address for coalescing and by size for allocation.
+/// Small tables take the smallest run that fits, leaving larger runs for
+/// larger tables. A full or fragmented heap can refuse a request without
+/// walking hundreds of thousands of descriptors under the recording lock.
+#[derive(Default)]
+struct DynamicSlots {
+    by_start: BTreeMap<u32, u32>,
+    by_size: BTreeSet<(u32, u32)>,
+}
+
+impl DynamicSlots {
+    fn insert(&mut self, start: u32, len: u32) {
+        self.by_start.insert(start, len);
+        self.by_size.insert((len, start));
+    }
+
+    fn remove(&mut self, start: u32, len: u32) {
+        self.by_start.remove(&start);
+        self.by_size.remove(&(len, start));
+    }
+
+    fn allocate(&mut self, n: u32) -> Option<u32> {
+        let &(len, start) = self.by_size.range((n, 0)..).next()?;
+        self.remove(start, len);
+        if len > n {
+            self.insert(start + n, len - n);
+        }
+        Some(start)
+    }
+
+    fn release(&mut self, mut start: u32, mut end: u32) {
+        if start >= end {
+            return;
+        }
+        if let Some((&left, &len)) = self.by_start.range(..=start).next_back()
+            && left + len >= start
+        {
+            self.remove(left, len);
+            start = left;
+            end = end.max(left + len);
+        }
+        while let Some((&right, &len)) = self.by_start.range(start..=end).next() {
+            self.remove(right, len);
+            end = end.max(right + len);
+        }
+        self.insert(start, end - start);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    fn taken(&self, slot: u32) -> bool {
+        self.by_start.range(..=slot).next_back().is_none_or(|(&start, &len)| slot >= start + len)
+    }
+}
+
 /// [`DYNAMIC`] for a heap of `count` title slots whose null slot is `null`
 /// (0: none): up to four times as many where the host heap has the room (a
 /// host that takes more than [`PORTABLE_VIEWS`]; `VICTORY_DYNAMIC_SLOTS`
@@ -1759,9 +1800,11 @@ impl HostHeap {
             waiting: Mutex::default(),
             away: Mutex::default(),
             kept: (0..count + extra).map(|_| Mutex::new(None)).collect(),
-            next: Mutex::new((0, vec![false; extra as usize])),
-            free: std::sync::atomic::AtomicU32::new(extra),
-            too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
+            dynamic_slots: Mutex::new({
+                let mut slots = DynamicSlots::default();
+                slots.release(0, extra);
+                slots
+            }),
             strides,
             buffers: Slots::new(count as usize),
             changed: Slots::new(count as usize),
@@ -1876,36 +1919,8 @@ impl HostHeap {
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::DynamicAsked, 1);
-        let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        let (next, taken) = &mut *guard;
-        let enough = self.free.load(std::sync::atomic::Ordering::Relaxed) >= n
-            && n < self.too_long.load(std::sync::atomic::Ordering::Relaxed);
-        let n = n as usize;
-        // Search from `next` on, then from the start (extending past cursor by
-        // n - 1 so contiguous runs crossing the cursor are not missed).
-        let cursor = *next as usize;
-        let end = self.dynamic as usize;
-        let second_end = cursor.saturating_add(n.saturating_sub(1)).min(end);
-        let starts = (cursor..end).chain(0..second_end);
-        let mut run = 0;
-        let mut found = None;
-        let mut last = usize::MAX;
-        for at in starts.take(if enough { usize::MAX } else { 0 }) {
-            // A run cannot wrap past the end.
-            if at != last.wrapping_add(1) {
-                run = 0;
-            }
-            last = at;
-            run = if taken[at] { 0 } else { run + 1 };
-            if run == n {
-                found = Some(at + 1 - n);
-                break;
-            }
-        }
-        let Some(first) = found else {
-            if enough {
-                self.too_long.fetch_min(n as u32, std::sync::atomic::Ordering::Relaxed);
-            }
+        let first = self.dynamic_slots.lock().unwrap_or_else(|e| e.into_inner()).allocate(n);
+        let Some(first) = first else {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!(n, "no free dynamic descriptor slots: a table is not made"));
             #[cfg(feature = "diagnostics")]
@@ -1918,10 +1933,7 @@ impl HostHeap {
         };
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::DynamicNs, started.elapsed().as_nanos() as u64);
-        taken[first..first + n].fill(true);
-        self.free.fetch_sub(n as u32, std::sync::atomic::Ordering::Relaxed);
-        *next = ((first + n) % end) as u32;
-        Some(self.count + first as u32)
+        Some(self.count + first)
     }
 
     /// The title slots this heap has host slots for; fewer than the title's
@@ -2963,14 +2975,8 @@ impl HostHeap {
         let Some(at) = first.checked_sub(self.count) else {
             return;
         };
-        let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        let end = (at + n).min(self.dynamic) as usize;
-        if let Some(slots) = guard.1.get_mut(at as usize..end) {
-            let given = slots.iter().filter(|taken| **taken).count() as u32;
-            self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
-            self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
-            slots.fill(false);
-        }
+        let end = at.saturating_add(n).min(self.dynamic);
+        self.dynamic_slots.lock().unwrap_or_else(|e| e.into_inner()).release(at, end);
     }
 
     /// Makes slot `index` (a dynamic one) from `view`; a null view if the
@@ -6104,7 +6110,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_search_can_find_a_run_across_the_cursor() {
+    fn dynamic_slots_coalesce_adjacent_runs_without_wrapping() {
         let Some(heap) = HostHeap::new(false, 4) else {
             eprintln!("no host descriptor heap; skipped");
             return;
@@ -6115,7 +6121,7 @@ mod tests {
         let rest = heap.dynamic(heap.dynamic - 5).unwrap();
         assert_eq!((first, left, right, rest), (4, 5, 7, 9));
 
-        // Reallocating the left half puts the cursor back in the middle.
+        // Reallocating the left half takes the hole exactly.
         heap.release(left, 2);
         assert_eq!(heap.dynamic(2), Some(left));
         heap.release(left, 2);
@@ -6128,6 +6134,17 @@ mod tests {
         let last = first + heap.dynamic - 1;
         heap.release(last, 1);
         assert_eq!(heap.dynamic(2), None);
+    }
+
+    #[test]
+    fn small_dynamic_tables_leave_room_for_large_ones() {
+        let mut slots = DynamicSlots::default();
+        slots.release(0, 12);
+        slots.release(20, 24);
+        assert_eq!(slots.allocate(3), Some(20));
+        assert_eq!(slots.allocate(12), Some(0));
+        assert_eq!(slots.allocate(1), Some(23));
+        assert_eq!(slots.allocate(1), None);
     }
 
     #[test]

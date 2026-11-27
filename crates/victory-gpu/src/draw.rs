@@ -4905,7 +4905,8 @@ mod tests {
             records: 16,
             scratch,
         };
-        let mut state = State { window: Some(window.clone()), ..Default::default() };
+        let mut state = State::default();
+        state.window = Some(window.clone());
         state.buffers_written();
         assert!(state.window.is_none());
         state.window = Some(window);

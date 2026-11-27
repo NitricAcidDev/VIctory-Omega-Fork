@@ -84,6 +84,90 @@ Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     if (!$text.Contains($cap)) { throw 'Could not find the NVIDIA frame-rate cap choices.' }
     $text.Replace($cap, '("30", "30 (THE GAME)"), ("15", "15 FPS")], live: false },')
 } -Previous $graphicsMenuBranding -PreviousHash 'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
+Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
+    param($text)
+    $text = $text.Replace(
+        'const SIXTIETH: Duration = Duration::from_micros(16_667);',
+        @'
+const SIXTIETH: Duration = Duration::from_micros(16_667);
+const THIRTIETH: Duration = Duration::from_micros(33_333);
+// The existing capture trigger uses 500 draws to recognize a 3D scene.
+#[cfg(windows)]
+const WORLD_DRAWS: u64 = 500;
+
+#[cfg(windows)]
+pub(crate) fn note_present(drawn: u64) {
+    if !menu_floor_enabled() {
+        return;
+    }
+    let mut clock = clock();
+    let Some(c) = clock.as_mut() else { return };
+    let draws = drawn.saturating_sub(c.last_drawn);
+    c.last_drawn = drawn;
+    // Two light frames avoid switching pace on a single fade or dropped frame.
+    c.light_frames = if draws >= WORLD_DRAWS { 0 } else { (c.light_frames + 1).min(2) };
+}
+
+fn menu_floor_enabled() -> bool {
+    asked().is_none() && interval_override().is_some_and(|interval| interval > THIRTIETH)
+}
+'@)
+    $text = $text.Replace(
+        '    interval: Duration,',
+        "    interval: Duration,`n    requested: Duration,`n    last_drawn: u64,`n    light_frames: u8,")
+    $text = $text.Replace(
+        "        interval,`n        first,",
+        "        interval,`n        requested: interval,`n        last_drawn: 0,`n        light_frames: 2,`n        first,")
+    $before = @'
+    let c = clock.get_or_insert_with(|| Clock {
+        start: Instant::now(),
+        interval: asked().or_else(interval_override).unwrap_or(SIXTIETH),
+        first: 0,
+    });
+'@
+    if (!$text.Contains($before)) { throw 'Could not find the NVIDIA frame clock.' }
+    $text.Replace($before, @'
+    let c = clock.get_or_insert_with(|| {
+        let requested = asked().or_else(interval_override).unwrap_or(SIXTIETH);
+        Clock {
+            start: Instant::now(),
+            interval: requested,
+            requested,
+            last_drawn: 0,
+            light_frames: 2,
+            first: 0,
+        }
+    });
+    if menu_floor_enabled() {
+        let interval = if c.light_frames == 2 {
+            c.requested.min(THIRTIETH)
+        } else {
+            c.requested
+        };
+        if interval != c.interval {
+            let last_tick = LAST.iter().map(|tick| tick.load(Ordering::Relaxed)).max().unwrap_or(0);
+            // Keep tick IDs monotonic and measure the next wait from the last tick.
+            let now = Instant::now();
+            let elapsed = now.duration_since(c.start);
+            let since_tick = if last_tick > c.first {
+                let tick_ns = u128::from(last_tick - c.first) * c.interval.as_nanos();
+                Duration::from_nanos(elapsed.as_nanos().saturating_sub(tick_ns).min(u128::from(u64::MAX)) as u64)
+            } else {
+                elapsed
+            };
+            c.start = now - since_tick.min(interval);
+            c.first = last_tick;
+            c.interval = interval;
+        }
+    }
+'@)
+}
+Update-NvidiaSource 'crates/victory-gpu/src/queue.rs' {
+    param($text)
+    $present = '    let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;'
+    if (!$text.Contains($present)) { throw 'Could not find the NVIDIA present hook.' }
+    $text.Replace($present, "$present`n    #[cfg(windows)]`n    crate::frame::note_present(crate::draw::drawn());")
+}
 Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
     param($text)
     $luma = 'static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);'

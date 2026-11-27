@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 if (!$LegacyRoot) { return }
 $legacy = (Resolve-Path -LiteralPath $LegacyRoot).Path
 
-function Copy-LegacyTree([string]$Source, [string]$Destination) {
+function Copy-LegacyTree([string]$Source, [string]$Destination, [switch]$MergePipelineHistory) {
     if (!(Test-Path -LiteralPath $Source -PathType Container)) { return }
     $sourcePath = [IO.Path]::GetFullPath($Source).TrimEnd('\', '/')
     $targetPath = [IO.Path]::GetFullPath($Destination).TrimEnd('\', '/')
@@ -24,6 +24,9 @@ function Copy-LegacyTree([string]$Source, [string]$Destination) {
         $hash.Dispose()
     }
     $marker = Join-Path $targetPath ".omega-migrated-$key"
+    if ($MergePipelineHistory) {
+        Merge-EarlyPipelines $sourcePath $targetPath $key
+    }
     if (Test-Path -LiteralPath $marker) { return }
 
     $null = [IO.Directory]::CreateDirectory($targetPath)
@@ -53,5 +56,33 @@ function Copy-LegacyTree([string]$Source, [string]$Destination) {
     [IO.File]::WriteAllText($marker, '')
 }
 
+function Merge-EarlyPipelines([string]$Source, [string]$Destination, [string]$Key) {
+    # Older migrations preserved the AppData list when both caches already existed.
+    $relative = 'pipelines/early-pipelines.txt'
+    $legacyList = Join-Path $Source $relative
+    $activeList = Join-Path $Destination $relative
+    $marker = Join-Path $Destination ".omega-migrated-pipelines-$Key"
+    if ((Test-Path -LiteralPath $marker) -or
+        ![IO.File]::Exists($activeList) -or ![IO.File]::Exists($legacyList)) { return }
+
+    $keys = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($list in $activeList, $legacyList) {
+        $folder = Get-Item -LiteralPath (Split-Path -Parent $list) -Force
+        $file = Get-Item -LiteralPath $list -Force
+        if (($folder.Attributes -bor $file.Attributes) -band [IO.FileAttributes]::ReparsePoint) { return }
+        foreach ($line in [IO.File]::ReadLines($list)) {
+            if ($line.Length) { $null = $keys.Add($line) }
+        }
+    }
+    $temporary = Join-Path (Split-Path -Parent $activeList) ('.omega-copy-' + [Guid]::NewGuid())
+    try {
+        [IO.File]::WriteAllLines($temporary, [string[]]$keys, [Text.UTF8Encoding]::new($false))
+        [IO.File]::Replace($temporary, $activeList, [NullString]::Value)
+    } finally {
+        [IO.File]::Delete($temporary)
+    }
+    [IO.File]::WriteAllText($marker, '')
+}
+
 if ($DataDirectory) { Copy-LegacyTree (Join-Path $legacy 'data') $DataDirectory }
-if ($CacheDirectory) { Copy-LegacyTree (Join-Path $legacy 'cache/cache-coolfox') $CacheDirectory }
+if ($CacheDirectory) { Copy-LegacyTree (Join-Path $legacy 'cache/cache-coolfox') $CacheDirectory -MergePipelineHistory }

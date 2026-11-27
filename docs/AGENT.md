@@ -415,8 +415,8 @@ it moves):
 | 2 | Port 6, `VICTORY_PORT_GUARD` (`9d723e88`, `2edf8446`, `65f9707d`, `00ab2acf`, `8f02bf74`, `88b63a2c`): the guards' lock shared by faults and refreshes, a claim per 64 KiB block; refresh planning on the threads beside the submitting one | title threads' waits 29 -> 2 ms a frame; -2 ms | - | **ported** to `coolfox-speed` (cherry-picked, `-x`); `GUARDS` is now an `RwLock`: our `VICTORY_GUARD_SPIN` and the diagnostics hold report (`GuardsHeld`) work on its write side. In-run A/B in the save (15 cycles of 4): 47.3 -> 46.5 ms, faster in 13 of 15; with port 7 too 47.1 -> 45.5 ms, faster in 14 of 14, no crash. **On in the launcher** (`VICTORY_PORT_GUARD=1`) |
 | 3 | Port 7, `VICTORY_PORT_JOURNAL` (`673be0ea`, `a609a2fc`, `a39509f5`): heap records asked for at the title's submit; the journal's notes in 64 parts with their own locks | submit thread waits ~6 -> 0.3 ms; -1 to -3 ms | - | **ported** (cherry-picked; the one conflict was in tests: their `rearm_tests` needs `rearm_guard`, which cool_fox lacks, and was left out); `cargo test -p victory-gpu` 371 passed. Same A/B: 47.3 -> 46.5 ms, faster in 14 of 15. **On in the launcher** (`VICTORY_PORT_JOURNAL=1`) |
 | 4 | Frame rate switch, `VICTORY_FRAME_INTERVAL_MS` (`49cb83b4`, `08b88b82`): our clock and the title's own 30 fps setting patched (byte-checked) | menus and videos at 60 | the owner saw a 30 cap in game | **ported** (`6c51495c`, `2488e015`); `frame.rs` merged: `VICTORY_FPS_LIMIT` (ours) first, then `VICTORY_FRAME_INTERVAL_MS`, then the title's. The title's own 30 is patched only with `VICTORY_FRAME_INTERVAL_MS` set (its bytes checked; the log says how many of the loads were patched). To run: `VICTORY_FRAME_INTERVAL_MS=16.667` with `VICTORY_FPS_LIMIT` unset |
-| 5 | Port 5, `VICTORY_PORT_CBV` (`3920dc26`): shaders read constant buffers as raw bytes, in place in title memory | ~22,000 fills a frame to none; -4.7 ms | in place only with port 1, which is 3x slower here (below) | after 6 |
-| 6 | Ports 1 and 2 (`VICTORY_PORT_CONSTANTS`, `_DESCRIPTORS`; already in cool_fox) | -4 to -20 ms | 1: the card reads the 174 MB constants heap over the bus, frames 3x as long; 2 without 1: posterized | find why 1 is slow here (heap kind, ReBAR / GPU upload heap) |
+| 5 | Port 5, `VICTORY_PORT_CBV` (`3920dc26`): shaders read constant buffers as raw bytes, in place in title memory | ~22,000 fills a frame to none; -4.7 ms | in place only with port 1, which is 3x slower here (below) | designed for card copies, not built (next step 2 below) |
+| 6 | Ports 1 and 2 (`VICTORY_PORT_CONSTANTS`, `_DESCRIPTORS`; already in cool_fox) | -4 to -20 ms | 1: the card reads the 174 MB constants heap over the bus, frames 3x as long; 2 without 1: posterized | **found why, not fixable as written** (next step 1 below): stays off on NVIDIA |
 | 7 | Textures uploaded in the submission's prelude (`5d6bd841`): frame order, flicker | - | - | to look at |
 | 8 | `VICTORY_OUTPUT` (`e151e71f`, `45cad4c5`) | -16 ms card time (Series X) | the launcher already runs Series S (1080p); the frame is set by the CPU | not needed now |
 | 9 | `VICTORY_PORT_GUARD_PLAN` (part of port 6; refresh planning on side threads, from 4,096 steps) | - | on with port 6 by default | A/B it alone next |
@@ -433,6 +433,20 @@ patched (3 of 3 loads), 21-22 fps, picture right, no crash.
 
 Next, in this order:
 
+Where the frame goes now (27 Nov 10:36, diagnostics build, the launcher
+with ports 6 and 7 and the frame rate switch, the owner's save, 300 s, no
+crash): **43.9 ms a frame, 23 fps** (47-48 ms in the morning). The
+submitting thread's line per frame (`victory_gpu::host`, "preparing per
+frame"): refreshes 13.0-13.3 ms (43 flushes of 6,500-7,150, 5,500-6,100 of
+them known to copy nothing; 1.6 ms one at a time in 341 before shader
+writes); copies in the card's memory 6.4; planning steps done on the card
+3.7-4.0; copies and fills 3.9-4.0; asking the write watch 3.7-4.2;
+putting the title's bytes under flights' writes 1.8-2.2 (4.7 before port 7);
+sending the lists 1.8; waiting for the heaps' records 0.4-1.2. Port 6's
+line: 436 faults a frame opened under the shared lock, 2.0-2.1 ms waiting;
+10,000-12,500 spins for block claims a frame. The refreshes and the card
+copies are the next targets.
+
 1. Item 6: why the card reading title memory in place (port 1) is 3x slower
    on the RTX 5080. Found (27 Nov, reading only): port 1 opens the title's
    own memory with `OpenExistingHeapFromAddress1` (`inplace.rs:240`; the
@@ -444,9 +458,30 @@ Next, in this order:
    check first that the title never reads that region back (CPU reads of
    such memory are uncached) and that nothing needs write watches or guards
    on it. Then port 5 (item 5, -4.7 ms on AMD) can follow.
-2. Item 7 (texture uploads in the submission prelude): may fix late
+   **Checked further (27 Nov, 09:40):** not feasible as written. The title
+   maps that heap at fixed addresses below 4 GiB (`port.rs` header: one
+   section, five views at 0x34310000...), and a D3D12 GPU-upload heap's
+   CPU mapping is at an address the driver picks: it cannot be put under
+   the title's addresses. NVIDIA cannot read an `OpenExistingHeapFromAddress`
+   heap cached (it is `WRITE_BACK`, so snooped), so port 1 stays off here.
+2. Port 5 without port 1 (an NVIDIA form, designed, not built): today a
+   constant buffer is a CPU fill at submission (`draw.rs`, `View::Constant`
+   -> `HostList::defer_constants`, `host.rs:7062`; with
+   `VICTORY_CARD_STEPS=2` only fills under flights' writes are copies on the
+   card, `host/card_steps.rs`). The 174 MB heap already has a copy in the
+   card's memory (`shadow::by_address`: `buffer` is the card's, `gpu(addr)`
+   its address). Port 5's raw reads (or, with no shader change, a plain CBV
+   where the title's address is on 256 bytes) could point the slot at that
+   copy: no fill. The catch: the copy must then be refreshed and sent for
+   those ranges first (`defer_refresh`), which costs what the fill saved or
+   more (the refreshes are already the biggest cost, below). Measure the
+   share of fills on 256 bytes and the refresh cost first; port 5's shader
+   change also re-translates every program (`victory shaders`).
+3. `VICTORY_CACHE_CORES` (`7c3d839c`): only acts where the last-level
+   caches differ in size (X3D); the 9900X's two are alike: nothing to gain.
+4. Item 7 (texture uploads in the submission prelude): may fix late
    textures and flicker.
-3. A fresh profile of `victory-submit` (`prof.ps1` in the scratchpad,
+5. A fresh profile of `victory-submit` (`prof.ps1` in the scratchpad,
    `profsum2.sh`): what is left after ports 6 and 7.
 
 ### From the RX 7900 XTX fork

@@ -15,6 +15,8 @@ Start-Process '.\Omega Launcher.lnk'
 
 In Omega Launcher, browse to your own complete Xbox game folder and select **Launch game**. The default profile is Series S at 1080p with ray tracing off. F3 toggles the performance overlay in a diagnostics build. Alt+Enter toggles borderless fullscreen. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
 
+The launcher saves your Home and Mods settings when you launch or close it. The in-game F1 menu has its own **Save for Next Start** action.
+
 `Build-Victory.ps1 -Diagnostics` builds the game in `target\diag` and the launcher in `target\omega-launcher`. Omit `-Diagnostics` for a release build. To put the shortcut in an existing Victory folder, add `-ShortcutDirectory 'E:\Victory'`.
 
 **Shadow boost** is off by default. Turn it on to lift the darkest areas of the diffuse lighting with ray tracing off. **Original graphics** bypasses the lighting and reflection corrections. **Low-memory mode** uses smaller buffer-copy windows.

@@ -48,6 +48,7 @@ internal sealed class Launcher : Form
     private readonly Label status = new();
     private readonly Button play = new();
     private readonly Image logo;
+    private Settings lastSaved;
     private bool launchPending;
     private static readonly string?[] FrameLimits = [null, "15", "30", "60", "unlimited"];
     private static readonly string[] DlssModes = ["off", "dlaa", "quality", "balanced", "performance"];
@@ -113,6 +114,7 @@ internal sealed class Launcher : Form
         memory.AccessibleDescription = "Uses smaller memory windows for buffer copies.";
         memory.Checked = saved.LowMemory;
         diagnostics.Checked = saved.Diagnostics;
+        lastSaved = CurrentSettings();
         diagnostics.CheckedChanged += (_, _) => RefreshStatus();
         folder.TextChanged += (_, _) => RefreshStatus();
         profile.SelectedIndexChanged += (_, _) => RefreshStatus();
@@ -437,13 +439,8 @@ internal sealed class Launcher : Form
 
         try
         {
-            Directory.CreateDirectory(StateDir);
-            var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
-                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked,
-                FrameLimits[frameLimit.SelectedIndex], audioTrace.Checked, nvidia.Checked,
-                DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex], waterLight.Checked,
-                unifiedTuning.Checked, trainer.Checked);
-            File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
+            var selection = CurrentSettings() with { Folder = Path.GetDirectoryName(exe) };
+            SaveSettings(selection);
             var start = new ProcessStartInfo("powershell.exe")
             {
                 WorkingDirectory = repo, UseShellExecute = false, CreateNoWindow = true,
@@ -558,7 +555,53 @@ internal sealed class Launcher : Form
                 : new();
         }
         catch (IOException) { return new(); }
+        catch (UnauthorizedAccessException) { return new(); }
         catch (JsonException) { return new(); }
+    }
+
+    private Settings CurrentSettings() => new(
+        folder.Text.Trim(), profile.SelectedIndex == 1, rays.Checked,
+        original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked,
+        FrameLimits[frameLimit.SelectedIndex], audioTrace.Checked, nvidia.Checked,
+        DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex],
+        waterLight.Checked, unifiedTuning.Checked, trainer.Checked);
+
+    private void SaveSettings(Settings selection)
+    {
+        Directory.CreateDirectory(StateDir);
+        var pending = Path.Combine(StateDir, $"settings.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(pending, JsonSerializer.Serialize(selection));
+            File.Move(pending, StateFile, overwrite: true);
+            lastSaved = selection;
+        }
+        finally
+        {
+            if (File.Exists(pending))
+                File.Delete(pending);
+        }
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        base.OnFormClosing(e);
+        if (e.Cancel)
+            return;
+
+        var selection = CurrentSettings();
+        if (selection == lastSaved)
+            return;
+
+        try
+        {
+            SaveSettings(selection);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"Could not save launcher settings. {error.Message}",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     protected override void Dispose(bool disposing)

@@ -360,9 +360,9 @@ fn plan(does: &[Does], stage: u32, by_order: bool, behind: &mut Option<(usize, u
         let mut level = 0;
         // Behind what writes what this reads or writes, and, if this
         // writes, behind what reads it.
-        let ahead: Box<dyn Iterator<Item = usize>> =
-            if writes { Box::new(0..out.len()) } else { Box::new(copies.iter().copied()) };
-        for k in ahead {
+        let count = if writes { out.len() } else { copies.len() };
+        for index in 0..count {
+            let k = if writes { index } else { copies[index] };
             let (j, at): (usize, u32) = out[k];
             let Some((jr, jw)) = reads_writes(&does[j]) else {
                 continue;

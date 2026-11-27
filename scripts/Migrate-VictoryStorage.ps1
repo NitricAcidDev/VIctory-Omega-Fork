@@ -85,4 +85,10 @@ function Merge-EarlyPipelines([string]$Source, [string]$Destination, [string]$Ke
 }
 
 if ($DataDirectory) { Copy-LegacyTree (Join-Path $legacy 'data') $DataDirectory }
-if ($CacheDirectory) { Copy-LegacyTree (Join-Path $legacy 'cache/cache-coolfox') $CacheDirectory -MergePipelineHistory }
+if ($CacheDirectory) {
+    $legacyCache = Join-Path $legacy 'cache/cache-coolfox'
+    if (!(Test-Path -LiteralPath $legacyCache -PathType Container)) {
+        $legacyCache = Join-Path $legacy 'cache'
+    }
+    Copy-LegacyTree $legacyCache $CacheDirectory -MergePipelineHistory
+}

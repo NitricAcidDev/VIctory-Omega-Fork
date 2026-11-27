@@ -1,5 +1,9 @@
 # NVIDIA Series S performance
 
+**RTX 5060 Ti 16 GB:** The latest reported story gameplay range is **15–25 FPS**, depending on the scene. The logged measurements below come from earlier runs.
+
+## Earlier diagnostics runs
+
 Measured 27 November 2026 on a GeForce RTX 5060 Ti with 16 GB VRAM and driver 621.24. These are 1920×1080 output runs of the diagnostics build. The lighting trace saw the Series S diffuse resolve at 1280×720.
 
 The table shows medians of logged intervals with at least 4,000 draws per frame. The runs include different camera positions and load states. Use the figures to identify bottlenecks and use a matched save and camera for comparisons between builds.

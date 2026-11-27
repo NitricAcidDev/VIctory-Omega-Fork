@@ -73,6 +73,8 @@ that runs an Xbox Series title natively on Windows from files the user supplies.
 
 ## The goal
 
+**RTX 5060 Ti 16 GB:** Reported story gameplay ranges from **15–25 FPS** depending on the scene. [Performance report](docs/performance-nvidia.md)
+
 **The first milestone is a stable 15 FPS at 1080p in story on NVIDIA GeForce RTX 50 Series, with console-like rendering.** The longer-term target is 30 FPS. Ray tracing is experimental. A warmed Series X ray-tracing run on the RTX 5060 Ti measured 2.3 FPS median indoors.
 
 The way there is **porting, not emulating**: patching the title's renderer so it

@@ -3157,7 +3157,12 @@ impl State {
         unsafe { list.list.Dispatch(x, y, z) };
         self.buffers_written();
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+        self.finish_ambient_dispatch(list, p, false);
+    }
+
+    fn finish_ambient_dispatch(&mut self, list: &HostList, p: &HostPipeline, indirect: bool) {
         if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
+            && (!indirect || role == crate::ambient::Role::Reflections)
             && crate::ambient::on()
             && self.ambient(list, p, role)
         {
@@ -4378,6 +4383,11 @@ impl State {
         }
         if kind == DISPATCH {
             self.buffers_written();
+            // A single uncounted dispatch can leave old history when its grid
+            // is empty. The reflection correction only caps that history.
+            if max == 1 && count.is_none() {
+                self.finish_ambient_dispatch(list, p, true);
+            }
         } else {
             self.drew(Some(p));
         }

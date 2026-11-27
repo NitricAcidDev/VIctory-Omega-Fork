@@ -10,6 +10,8 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$Safe,
     [switch]$RayTracing,
+    [switch]$OriginalGraphics,
+    [switch]$PerformanceLog,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
@@ -19,8 +21,7 @@ $settings = @{
     VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'
     VICTORY_INDIRECT_BATCH = '2'; VICTORY_MAP_THREADS = '1'; VICTORY_TITLE_PRIORITIES = '0'; VICTORY_CARD_AWAKE = '1'
     VICTORY_PANEL = '1'; VICTORY_NAN_SCRUB = '1'; VICTORY_SYNC_FINE = '1'
-    VICTORY_AMBIENT_FLOOR = '0.05'; VICTORY_AMBIENT_PROBE_LIMIT = '2'; VICTORY_AMBIENT_AIR = '1.5'
-    VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
+    VICTORY_SHOW_AFTER = '1'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
 }
 if ($Safe) {
     $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
@@ -28,6 +29,13 @@ if ($Safe) {
     $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
 }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
+if (!$OriginalGraphics -and !$RayTracing) {
+    $settings.VICTORY_AMBIENT = '0.8'
+    $settings.VICTORY_AMBIENT_FLOOR = '0.09'
+    $settings.VICTORY_AMBIENT_PROBE_LIMIT = '2'
+    $settings.VICTORY_AMBIENT_AIR = '1.5'
+}
+if ($PerformanceLog) { $settings.VICTORY_LOG = 'warn,victory_gpu::host=info,victory_gpu::pipeline=info,victory_gpu::ambient=info' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"

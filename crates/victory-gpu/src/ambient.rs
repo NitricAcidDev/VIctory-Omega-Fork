@@ -34,7 +34,7 @@
 //! sky's light indoors too, a brown veil at sunset. `VICTORY_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::s;
@@ -63,7 +63,7 @@ pub(crate) fn role(container: &[u8]) -> Option<Role> {
         Some(Role::Radiance)
     } else if has(b"CS_AccumulateLocalLightInscatteringVolume") {
         Some(Role::Air)
-    } else if has(b"CS_UpdateHistory") {
+    } else if has(b"CS_UpdateHistory_e877ef6e") || has(b"CS_BilateralBlurAndUpdateHistory_e877ef6e") {
         Some(Role::Reflections)
     } else {
         None
@@ -320,7 +320,18 @@ void hold_reflections(uint3 at : SV_DispatchThreadID) {
     if (at.x >= width || at.y >= height) return;
     float3 reflected = unpack(light[at.xy]);
     float peak = max(reflected.r, max(reflected.g, reflected.b));
-    float cap = max(dot(cells[CELLS].rgb, LUMA), least) * follow;
+    float2 grid = (float2(at.xy) + 0.5) / float2(width, height) * float2(CX, CY) - 0.5;
+    int2 base = int2(floor(grid));
+    float2 f = frac(grid);
+    float local = 0.0;
+    for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
+        int2 q = clamp(base + int2(x, y), int2(0, 0), int2(CX - 1, CY - 1));
+        float weight = (x ? f.x : 1.0 - f.x) * (y ? f.y : 1.0 - f.y);
+        local += dot(cells[q.y * CX + q.x].rgb, LUMA) * weight;
+    }
+    // Avoid using a distant bright window as the limit for the whole room.
+    float reference = constant > 0.0 ? constant : max(local, 0.25 * dot(cells[CELLS].rgb, LUMA));
+    float cap = max(reference, 0.01) * follow;
     if (peak > cap) light[at.xy] = pack(reflected * (cap / peak));
 }
 
@@ -519,27 +530,24 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     if role == Role::Air && (constant > 0.0 || air() == 0.0) {
         return false;
     }
-    static SAID: Mutex<u32> = Mutex::new(0);
-    {
-        let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-        if *said < 4 {
-            *said += 1;
-            tracing::info!(?role, size = ?views.size, level, constant, floor = floor(), "a stand-in for the indirect light");
-        }
+    static SAID: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    let role_bit = 1 << role as u8;
+    if SAID.fetch_or(role_bit, Ordering::Relaxed) & role_bit == 0 {
+        tracing::info!(?role, size = ?views.size, level, constant, floor = floor(), "recording a lighting pass");
     }
     list.keep(&pass.cells);
     list.keep(&pass.points);
     let [strength, radius] = shade();
     // Reflections use the same estimate as the diffuse light for their cap.
-    let follow = if role == Role::Reflections { 0.5 } else { 0.45 };
-    let floats = [level, constant, strength, radius, 0.1, follow];
+    let follow = if role == Role::Reflections { 0.5f32 } else { 0.04 };
+    let floats = [level, constant, strength, radius, 0.1, 0.45];
     let mut words = [0u32; 12];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
     words[6] = views.size[0];
     words[7] = views.size[1];
-    words[8] = 0.04f32.to_bits();
+    words[8] = follow.to_bits();
     // Its sign says how the bound is taken ([`chroma`]).
     let limit = probe_limit();
     words[9] = if chroma() { limit } else { -limit }.to_bits();
@@ -605,6 +613,9 @@ mod tests {
         assert_eq!(role(b"..CS_ScreenProbes_TemporalResolve_a911b49c_Wrapped.."), Some(Role::Resolve));
         assert_eq!(role(b"..CS_CacheScreenSpaceRadiance_eed2fc35.."), Some(Role::Radiance));
         assert_eq!(role(b"CS_AccumulateLocalLightInscatteringVolume_7e2f5eef"), Some(Role::Air));
+        assert_eq!(role(b"CS_UpdateHistory_e877ef6e_Wrapped"), Some(Role::Reflections));
+        assert_eq!(role(b"CS_BilateralBlurAndUpdateHistory_e877ef6e_Wrapped"), Some(Role::Reflections));
+        assert_eq!(role(b"CS_UpdateHistory_unrelated"), None);
         assert_eq!(role(b"CS_TemporalResolve"), None);
     }
 

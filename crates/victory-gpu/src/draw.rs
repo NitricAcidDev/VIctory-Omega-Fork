@@ -4103,6 +4103,7 @@ impl State {
     /// Shaders that can write buffers were recorded: arguments may be others
     /// from here on.
     fn buffers_written(&mut self) {
+        self.window = None;
         match &mut self.batch {
             Some(batch) if batches() == 2 => batch.wrote = true,
             batch => *batch = None,
@@ -4113,6 +4114,7 @@ impl State {
     /// if its shaders can store to buffers).
     fn drew(&mut self, p: Option<&HostPipeline>) {
         if p.is_none_or(|p| p.stages.iter().any(|stage| stage.translated().stores)) {
+            self.window = None;
             self.batch = None;
         }
     }
@@ -4886,7 +4888,30 @@ fn staging_budget_per_frame(vram_budget: Option<u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::staging_budget_per_frame;
+    use super::{State, Window, staging_budget_per_frame};
+
+    #[test]
+    fn buffer_writers_invalidate_indirect_windows() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let (scratch, _) = host.upload_buffer(4096).expect("test upload buffer");
+        let window = Window {
+            copy: 1,
+            kind: 10,
+            stride: 12,
+            step: 12,
+            base: 0,
+            records: 16,
+            scratch,
+        };
+        let mut state = State { window: Some(window.clone()), ..Default::default() };
+        state.buffers_written();
+        assert!(state.window.is_none());
+        state.window = Some(window);
+        state.drew(None);
+        assert!(state.window.is_none());
+    }
 
     #[test]
     fn staging_budget_scales_with_vram_budget() {

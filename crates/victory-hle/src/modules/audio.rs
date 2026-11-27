@@ -19,6 +19,7 @@
 use std::alloc::Layout;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
@@ -378,15 +379,19 @@ fn xma() -> RwLockReadGuard<'static, Xma> {
 struct Context(*mut u32);
 
 impl Context {
-    fn get(self, word: usize) -> u32 {
-        // SAFETY: inside the context array; the title reads and writes it
-        // concurrently, like the hardware's.
-        unsafe { self.0.add(word).read_volatile() }
+    fn word(&self, word: usize) -> &AtomicU32 {
+        // SAFETY: the context array has aligned 32-bit words and remains
+        // alive while the XMA read lock is held.
+        unsafe { AtomicU32::from_ptr(self.0.add(word)) }
     }
 
+    fn get(self, word: usize) -> u32 {
+        self.word(word).load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
     fn set(self, word: usize, value: u32) {
-        // SAFETY: as above.
-        unsafe { self.0.add(word).write_volatile(value) }
+        self.word(word).store(value, Ordering::Release);
     }
 
     fn field(self, word: usize, shift: u32, bits: u32) -> u32 {
@@ -395,7 +400,12 @@ impl Context {
 
     fn set_field(self, word: usize, shift: u32, bits: u32, value: u32) {
         let mask = ((1u32 << bits) - 1) << shift;
-        self.set(word, (self.get(word) & !mask) | ((value << shift) & mask));
+        let value = (value << shift) & mask;
+        // The title can publish another input in the same word as the
+        // decoder's write cursor. Retry if it changed the word in between.
+        let _ = self.word(word).fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            Some((old & !mask) | value)
+        });
     }
 
     fn channels(self) -> usize {
@@ -583,8 +593,7 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
             }
             voice.ended = true;
             voice.trace.ended_ms = Some(voice.trace.since.elapsed().as_millis());
-            context.set_field(2, 26, 5, INPUT_INVALID);
-            context.set_field(2, 31, 1, 1);
+            context.set_field(2, 26, 6, INPUT_INVALID | 32);
             return !voice.pcm.is_empty();
         }
         current = 1 - current;
@@ -651,7 +660,9 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
         // this one, its last.
         voice.skip = context.field(1, 17, 3) as usize * xma::SUBFRAME_SAMPLES;
     }
-    if next == 0 {
+    // A loop can return to bit zero, which means the first frame in this
+    // packet buffer. Only exhaustion of the input clears its valid bit.
+    if next == 0 && !looping {
         context.set_field(0, 20 + current, 1, 0);
     }
     context.set_field(2, 0, 26, next as u32);
@@ -1302,7 +1313,7 @@ mod tests {
             1 << 31 | 3 << 27 | end_subframe << 12 | skip_subframes << 17,
         );
         context.set(2, first);
-        context.set(3, first);
+        context.set(3, 0);
         context.set(4, second);
         context.set(5, input_apu);
         let mut voice = Voice {
@@ -1332,7 +1343,7 @@ mod tests {
         // Before the loop: the first frame whole.
         assert_eq!(step(second), 4 * subframe);
         // The loop's last frame: its first two subframes, then back.
-        assert_eq!(step(first), 2 * subframe, "the loop's last frame");
+        assert_eq!(step(0), 2 * subframe, "the loop's last frame");
         assert_eq!(context.field(0, 12, 8), 0, "one loop, taken");
         // The loop's first frame again: without its first two subframes.
         assert_eq!(step(second), 2 * subframe, "the loop's first frame");

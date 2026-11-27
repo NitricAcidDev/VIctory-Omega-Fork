@@ -58,8 +58,8 @@ internal sealed class Launcher : Form
         repo = FindCheckout();
 
         Text = "Omega Launcher";
-        ClientSize = new Size(780, 704);
-        MinimumSize = new Size(700, 729);
+        ClientSize = new Size(780, 720);
+        MinimumSize = SizeFromClientSize(new Size(684, 700));
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(22, 16, 30);
         ForeColor = Ink;
@@ -68,13 +68,14 @@ internal sealed class Launcher : Form
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill, Padding = new Padding(28, 22, 28, 20),
-            ColumnCount = 1, RowCount = 6
+            ColumnCount = 1, RowCount = 7
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 130));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 114));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(layout);
         layout.Controls.Add(Hero(), 0, 0);
@@ -189,15 +190,24 @@ internal sealed class Launcher : Form
         var title = LabelFor("Launch options", 13, Ink, bold: true);
         card.Controls.Add(title, 0, 0);
         card.SetColumnSpan(title, 2);
-        var options = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
-        foreach (var (check, label) in new[] {
-            (original, "Original graphics"), (shadowBoost, "Shadow boost"), (memory, "Low-memory mode"),
-            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing") })
+        var options = new TableLayoutPanel
         {
+            Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2, Margin = Padding.Empty
+        };
+        for (int column = 0; column < options.ColumnCount; column++)
+            options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / options.ColumnCount));
+        options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        var choices = new[] {
+            (original, "Original graphics"), (shadowBoost, "Shadow boost"), (memory, "Low-memory mode"),
+            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing") };
+        for (int index = 0; index < choices.Length; index++)
+        {
+            var (check, label) = choices[index];
             check.Text = label;
             check.AutoSize = true;
-            check.Margin = new Padding(3, 4, 17, 2);
-            options.Controls.Add(check);
+            check.Anchor = AnchorStyles.Left;
+            options.Controls.Add(check, index % options.ColumnCount, index / options.ColumnCount);
         }
         card.Controls.Add(options, 0, 1);
         card.SetColumnSpan(options, 2);

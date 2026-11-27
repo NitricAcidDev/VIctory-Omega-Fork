@@ -33,8 +33,6 @@ The migrator copies missing files into `%LOCALAPPDATA%\victory\data` and `%LOCAL
 
 Omega Launcher provides the frame limit and audio tracing on its main screen. Select the NVIDIA runner to enable the DLSS and Frame Generation controls. **F1** opens its graphics menu in game.
 
-**F5** opens the Omega World preview in the NVIDIA runner. The weather, time and date controls show as unavailable until a verified game-side interface is connected. Press F5 or Esc to close the panel, or F1 to switch to graphics.
-
 Build the optional NVIDIA runner and install Streamline once:
 
 ```powershell
@@ -49,6 +47,17 @@ Reopen Omega Launcher, check **Use NVIDIA runner**, and select **Launch game**. 
 ```
 
 For a fresh NVIDIA launch, Omega Launcher applies the console, ray tracing, graphics, low-memory and diagnostics choices. Game default uses 30 FPS. Original graphics uses the game's upscaler and lighting. F1 still saves its settings and can restart the game when requested. The launcher skips the automatic first-run restart and gives streamed textures more time to catch up when the queue is large. Series X defaults to 1440p in the NVIDIA runner. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
+
+### ScriptHook VI trainer
+
+Install CMake 3.24 or newer and the Visual Studio C++ build tools with MASM. Build the NVIDIA runner and install the trainer beside your Xbox game executable:
+
+```powershell
+.\scripts\Build-OmegaNvidia.ps1
+.\scripts\Install-ScriptHookVI.ps1 -GameDirectory '<Xbox game folder>'
+```
+
+Select **Use NVIDIA runner** in Omega Launcher. In offline story gameplay, press **F4** to open the trainer. Use the arrow keys to navigate, Enter to select and Backspace to go back. **F1** opens Omega graphics settings. The trainer targets Xbox build 1.0.2.1. [ScriptHook VI](https://github.com/modpapi/scripthook-vi)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.

@@ -20,7 +20,7 @@ if (!(Test-Path -LiteralPath (Join-Path $SourceDir 'Cargo.toml'))) {
     if ($LASTEXITCODE) { throw 'Could not check out the NVIDIA source.' }
 }
 
-function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$Previous) {
+function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$Previous, [string]$PreviousHash) {
     $file = Join-Path $SourceDir $Path
     $original = ((git -C $SourceDir show "${commit}:$Path") -join [char]10).TrimEnd("`n")
     if ($LASTEXITCODE) { throw "Could not read $Path at $commit." }
@@ -28,9 +28,17 @@ function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$
     if ($updated -eq $original) { throw "The Omega branding change did not match $Path." }
     $current = ([IO.File]::ReadAllText($file) -replace '\r\n', "`n").TrimEnd("`n")
     if ($current -ne $original -and $current -ne $updated -and (!$Previous -or $current -ne (& $Previous $original))) {
-        throw "Preserving local modifications in $file."
+        if (!$PreviousHash -or (Get-NvidiaSourceHash $current) -ne $PreviousHash) {
+            throw "Preserving local modifications in $file."
+        }
     }
     [IO.File]::WriteAllText($file, $updated + [char]10, [Text.UTF8Encoding]::new($false))
+}
+
+function Get-NvidiaSourceHash([string]$Text) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '') }
+    finally { $sha.Dispose() }
 }
 
 $branding = Get-Content -LiteralPath (Join-Path $repo 'crates/victory-gpu/src/window.rs') -Raw
@@ -64,81 +72,11 @@ Update-NvidiaSource 'crates/victory-gpu/src/host.rs' {
     $text = $text.Replace("        CreateWindowExW(`n            WINDOW_EX_STYLE(0),`n            CLASS,", "        let hwnd = CreateWindowExW(`n            WINDOW_EX_STYLE(0),`n            CLASS,")
     $text.Replace("            Some(instance.into()),`n            None,`n        )", "            Some(instance.into()),`n            None,`n        )?;`n        crate::omega_window::brand(hwnd.0);`n        Ok(hwnd)")
 }
-$graphicsMenuBranding = {
-    param($text)
-    $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
-}
+# Accept the exact generated menu from the retired Omega World preview.
 Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     param($text)
-    $text = & $graphicsMenuBranding $text
-    $text = $text.Replace('VK_ESCAPE, VK_F1, VK_LEFT', 'VK_ESCAPE, VK_F1, VK_F5, VK_LEFT')
-    $text = $text.Replace('[u16; 7] = [VK_F1, VK_UP', '[u16; 8] = [VK_F1, VK_F5, VK_UP')
-    $text = $text.Replace('    failed: bool,', "    failed: bool,`n    world_open: bool,")
-    $text = $text.Replace('failed: false }', 'failed: false, world_open: false }')
-    $text = $text.Replace('    fn lines(&self) -> Vec<String> {', @'
-    fn toggle_page(&mut self, vk: u16, open: bool) -> bool {
-        let next = match vk {
-            VK_F1 => !open || self.world_open,
-            VK_F5 => !open || !self.world_open,
-            VK_ESCAPE if open => false,
-            _ => return false,
-        };
-        self.world_open = next && vk == VK_F5;
-        self.note.clear();
-        self.changed = true;
-        crate::SETTINGS_MENU_OPEN.store(next, Ordering::Relaxed);
-        true
-    }
-
-    fn lines(&self) -> Vec<String> {
-        if self.world_open {
-            return [
-                "OMEGA WORLD                    F5 OR ESC CLOSES",
-                "F1 OPENS GRAPHICS",
-                "",
-                "  WEATHER                      UNAVAILABLE",
-                "  TIME                         UNAVAILABLE",
-                "  DATE                         UNAVAILABLE",
-                "",
-                "THIS RUNNER HAS NO WORLD CONTROL CONNECTION.",
-            ].into_iter().map(str::to_owned).collect();
-        }
-'@)
-    $originalKeys = @'
-            if vk == VK_F1 || (open && vk == VK_ESCAPE) {
-                crate::SETTINGS_MENU_OPEN.store(!open && vk == VK_F1, Ordering::Relaxed);
-                self.note.clear();
-                self.changed = true;
-                continue;
-            }
-            if !open {
-'@
-    if (!$text.Contains($originalKeys)) { throw 'Could not find the NVIDIA menu key handler.' }
-    $text = $text.Replace($originalKeys, @'
-            if self.toggle_page(vk, open) || !open || self.world_open {
-'@)
-    $text.Replace("mod tests {`n    use super::*;", @'
-mod tests {
-    use super::*;
-
-    #[test]
-    fn world_page_switches_without_leaking_graphics_input() {
-        let mut menu = Menu::new();
-        assert!(menu.toggle_page(VK_F5, false));
-        assert!(Menu::open() && menu.world_open);
-        assert!(menu.lines().iter().all(|line| line.len() <= COLUMNS as usize));
-        assert!(menu.toggle_page(VK_F1, true));
-        assert!(Menu::open() && !menu.world_open);
-        assert!(menu.toggle_page(VK_F5, true));
-        assert!(Menu::open() && menu.world_open);
-        assert!(menu.toggle_page(VK_F5, true));
-        assert!(!Menu::open() && !menu.world_open);
-        assert!(menu.toggle_page(VK_F5, false));
-        assert!(menu.toggle_page(VK_ESCAPE, true));
-        assert!(!Menu::open() && !menu.world_open);
-    }
-'@)
-} $graphicsMenuBranding
+    $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
+} -PreviousHash 'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
 Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
     param($text)
     $luma = 'static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);'
@@ -207,6 +145,15 @@ Update-NvidiaSource 'apps/victory/src/play.rs' {
     $text = & $launcherOptions $text
     $text.Replace('    if !s.contains_key("VICTORY_WARMUP_RESTART")', '    if s.get("VICTORY_WARMUP_RESTART").is_some_and(|value| value != "0")')
 } $launcherOptions
+
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'omega-scripthook-host.rs') -Destination (Join-Path $SourceDir 'apps/victory/src/omega_scripthook_host.rs')
+Update-NvidiaSource 'apps/victory/src/run.rs' {
+    param($text)
+    $entry = '    let main = unsafe { Arc::new(image).spawn_main(dlls)? };'
+    if (!$text.Contains($entry)) { throw 'Could not find the NVIDIA title entry point.' }
+    $text = "#[cfg(windows)]`n#[path = `"omega_scripthook_host.rs`"]`nmod omega_scripthook_host;`n`n" + $text
+    $text.Replace($entry, "    omega_scripthook_host::start(image.base(), image.info().size_of_image as u64, exe);`n$entry")
+}
 
 Push-Location $SourceDir
 try {

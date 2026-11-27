@@ -122,7 +122,9 @@ fn toggle(hwnd: HWND) {
                 .borrow_mut()
                 .insert(hwnd as usize, Windowed { style, placement })
         });
-        let borderless = style & !(wm::WS_OVERLAPPEDWINDOW | wm::WS_MAXIMIZE) | wm::WS_POPUP;
+        // Keep the taskbar's minimize/restore command available in borderless mode.
+        let frame = wm::WS_CAPTION | wm::WS_THICKFRAME | wm::WS_MAXIMIZEBOX | wm::WS_MAXIMIZE;
+        let borderless = style & !frame | wm::WS_POPUP;
         wm::SetWindowLongW(hwnd, wm::GWL_STYLE, borderless as i32);
         let area = info.rcMonitor;
         wm::SetWindowPos(

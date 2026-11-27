@@ -20,6 +20,8 @@ internal sealed class Launcher : Form
     private static readonly Color Ink = Color.FromArgb(241, 234, 246);
     private static readonly Color Muted = Color.FromArgb(191, 177, 202);
     private static readonly Color Panel = Color.FromArgb(35, 29, 51);
+    private static readonly Color Input = Color.FromArgb(24, 18, 34);
+    private static readonly Color Selected = Color.FromArgb(67, 44, 82);
     private static readonly Color Accent = Color.FromArgb(140, 232, 225);
     private static readonly string StateDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Omega Launcher");
@@ -31,17 +33,17 @@ internal sealed class Launcher : Form
     private readonly string? repo;
     private readonly TextBox folder = new();
     private readonly ComboBox profile = new();
-    private readonly CheckBox rays = new();
-    private readonly CheckBox original = new();
-    private readonly CheckBox shadowBoost = new();
-    private readonly CheckBox memory = new();
-    private readonly CheckBox diagnostics = new();
-    private readonly CheckBox audioTrace = new();
-    private readonly CheckBox waterLight = new();
-    private readonly CheckBox unifiedTuning = new();
-    private readonly CheckBox trainer = new();
+    private readonly CheckBox rays = new DarkCheckBox();
+    private readonly CheckBox original = new DarkCheckBox();
+    private readonly CheckBox shadowBoost = new DarkCheckBox();
+    private readonly CheckBox memory = new DarkCheckBox();
+    private readonly CheckBox diagnostics = new DarkCheckBox();
+    private readonly CheckBox audioTrace = new DarkCheckBox();
+    private readonly CheckBox waterLight = new DarkCheckBox();
+    private readonly CheckBox unifiedTuning = new DarkCheckBox();
+    private readonly CheckBox trainer = new DarkCheckBox();
     private readonly Label trainerStatus = new();
-    private readonly CheckBox nvidia = new();
+    private readonly CheckBox nvidia = new DarkCheckBox();
     private readonly ComboBox frameLimit = new();
     private readonly ComboBox dlss = new();
     private readonly ComboBox frameGeneration = new();
@@ -64,7 +66,7 @@ internal sealed class Launcher : Form
 
         Text = "Omega Launcher";
         ClientSize = new Size(780, 752);
-        MinimumSize = SizeFromClientSize(new Size(684, 732));
+        MinimumSize = SizeFromClientSize(new Size(684, 736));
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(22, 16, 30);
         ForeColor = Ink;
@@ -82,13 +84,7 @@ internal sealed class Launcher : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 114));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var tabs = new TabControl { Dock = DockStyle.Fill };
-        var home = new TabPage("Home") { BackColor = BackColor };
-        var mods = new TabPage("Mods") { BackColor = BackColor };
-        home.Controls.Add(layout);
-        mods.Controls.Add(ModsPanel());
-        tabs.TabPages.AddRange([home, mods]);
-        Controls.Add(tabs);
+        Controls.Add(Navigation(layout, ModsPanel()));
         layout.Controls.Add(Hero(), 0, 0);
         layout.Controls.Add(FolderCard(), 0, 1);
         layout.Controls.Add(ProfileCard(), 0, 2);
@@ -124,6 +120,43 @@ internal sealed class Launcher : Form
         nvidia.CheckedChanged += (_, _) => RefreshStatus();
         dlss.SelectedIndexChanged += (_, _) => RefreshStatus();
         RefreshStatus();
+    }
+
+    private Control Navigation(Control homePage, Control modsPage)
+    {
+        var pages = new Panel { Dock = DockStyle.Fill };
+        pages.Controls.Add(homePage);
+        pages.Controls.Add(modsPage);
+        var bar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top, Height = 36,
+            Padding = new Padding(28, 4, 0, 0), WrapContents = false
+        };
+        var home = MakeButton("Home", false);
+        var mods = MakeButton("Mods", false);
+        foreach (var button in new[] { home, mods })
+        {
+            button.Dock = DockStyle.None;
+            button.Size = new Size(82, 28);
+            button.Margin = new Padding(0, 0, 6, 0);
+            bar.Controls.Add(button);
+        }
+
+        void ShowPage(bool showHome)
+        {
+            homePage.Visible = showHome;
+            modsPage.Visible = !showHome;
+            home.BackColor = showHome ? Selected : Panel;
+            mods.BackColor = showHome ? Panel : Selected;
+        }
+
+        home.Click += (_, _) => ShowPage(true);
+        mods.Click += (_, _) => ShowPage(false);
+        ShowPage(true);
+        var navigation = new Panel { Dock = DockStyle.Fill };
+        navigation.Controls.Add(pages);
+        navigation.Controls.Add(bar);
+        return navigation;
     }
 
     private Control ModsPanel()
@@ -176,7 +209,7 @@ internal sealed class Launcher : Form
         card.SetColumnSpan(help, 2);
         folder.PlaceholderText = @"D:\Games\MyDump";
         folder.Dock = DockStyle.Fill;
-        folder.BackColor = Color.FromArgb(24, 18, 34);
+        folder.BackColor = Input;
         folder.ForeColor = Ink;
         folder.BorderStyle = BorderStyle.FixedSingle;
         folder.Margin = new Padding(3, 6, 10, 0);
@@ -205,11 +238,8 @@ internal sealed class Launcher : Form
         card.Controls.Add(help, 0, 1);
         card.SetColumnSpan(help, 2);
         profile.Items.AddRange(["Series S · 1080p", "Series X"]);
-        profile.DropDownStyle = ComboBoxStyle.DropDownList;
-        profile.Dock = DockStyle.Fill;
+        StyleChoice(profile);
         profile.Margin = new Padding(3, 6, 10, 0);
-        profile.BackColor = Color.FromArgb(24, 18, 34);
-        profile.ForeColor = Ink;
         card.Controls.Add(profile, 0, 2);
         rays.Text = "Ray tracing";
         rays.AccessibleDescription = "Experimental. Leave off if you see rendering artifacts.";
@@ -272,8 +302,7 @@ internal sealed class Launcher : Form
         {
             card.Controls.Add(LabelFor(label, 10, Ink), column, 1);
             field.AccessibleName = label;
-            field.DropDownStyle = ComboBoxStyle.DropDownList;
-            field.Dock = DockStyle.Fill;
+            StyleChoice(field);
             field.Items.AddRange(values);
             card.Controls.Add(field, column, 2);
         }
@@ -282,6 +311,64 @@ internal sealed class Launcher : Form
         AddChoice(dlss, 1, "DLSS", ["Off", "DLAA", "Quality", "Balanced", "Performance"]);
         AddChoice(frameGeneration, 2, "Frame Generation", ["Off", "2×", "3×", "4×", "5×", "6×"]);
         return card;
+    }
+
+    private static void StyleChoice(ComboBox field)
+    {
+        field.DropDownStyle = ComboBoxStyle.DropDownList;
+        field.FlatStyle = FlatStyle.Flat;
+        field.BackColor = Input;
+        field.ForeColor = Ink;
+        field.Dock = DockStyle.Fill;
+        field.DrawMode = DrawMode.OwnerDrawFixed;
+        field.DrawItem += (_, e) =>
+        {
+            bool selected = (e.State & DrawItemState.Selected) != 0
+                && (e.State & DrawItemState.ComboBoxEdit) == 0;
+            using var fill = new SolidBrush(selected ? Selected : Input);
+            e.Graphics.FillRectangle(fill, e.Bounds);
+            if (e.Index >= 0)
+            {
+                var bounds = e.Bounds;
+                bounds.X += 4;
+                bounds.Width -= 4;
+                TextRenderer.DrawText(e.Graphics, field.GetItemText(field.Items[e.Index]), field.Font, bounds,
+                    field.Enabled ? Ink : Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            }
+            e.DrawFocusRectangle();
+        };
+    }
+
+    private sealed class DarkCheckBox : CheckBox
+    {
+        public DarkCheckBox() => FlatStyle = FlatStyle.Flat;
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(BackColor);
+            int glyph = 13 * DeviceDpi / 96;
+            var box = new Rectangle(1, (ClientSize.Height - glyph) / 2, glyph, glyph);
+            using var fill = new SolidBrush(Checked && Enabled ? Selected : Input);
+            using var border = new Pen(Focused && Enabled ? Accent : Muted);
+            e.Graphics.FillRectangle(fill, box);
+            e.Graphics.DrawRectangle(border, box);
+            if (Checked)
+            {
+                using var tick = new Pen(Enabled ? Accent : Muted, Math.Max(1f, DeviceDpi / 96f));
+                e.Graphics.DrawLines(tick, new Point[] {
+                    new(box.Left + glyph / 4, box.Top + glyph / 2),
+                    new(box.Left + glyph * 2 / 5, box.Top + glyph * 3 / 4),
+                    new(box.Left + glyph * 3 / 4, box.Top + glyph / 4)
+                });
+            }
+            int labelLeft = box.Right + 5 * DeviceDpi / 96;
+            var label = new Rectangle(labelLeft, 0, Math.Max(0, ClientSize.Width - labelLeft), ClientSize.Height);
+            TextRenderer.DrawText(e.Graphics, Text, Font, label, Enabled ? Ink : Muted,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            if (Focused && ShowFocusCues)
+                ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle);
+        }
     }
 
     private Control Footer()
@@ -347,7 +434,7 @@ internal sealed class Launcher : Form
         button.Text = text;
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderSize = 0;
-        button.BackColor = primary ? Accent : Color.FromArgb(67, 44, 82);
+        button.BackColor = primary ? Accent : Selected;
         button.ForeColor = primary ? Color.FromArgb(12, 39, 43) : Ink;
         button.Dock = DockStyle.Fill;
         button.Margin = new Padding(3, 3, 0, 3);

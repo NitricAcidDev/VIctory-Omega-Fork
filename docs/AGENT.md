@@ -406,6 +406,34 @@ frame (22 fps) in a city street, Series S, ports 1, 2, 5, 6, 7 on (RX 7900
 XTX, i9-12900K). Ours in the owner's save (interior, Series S): 47-48 ms
 before this round.
 
+**Handoff (27 Nov, 12:20; the owner's weekly usage at 94%, work stopped
+here).** For the next agent:
+
+- **The owner's examples to study next** (given at 12:20, not yet opened
+  or read by anyone here; check what each changes against this tree
+  before porting, under the rules above):
+  - https://github.com/T0nyyyyy/Nvidia-framegenmaybefixed- (by its name,
+    NVIDIA frame generation, "maybe fixed")
+  - https://github.com/dudedicosta/vicec-tay
+- **What the owner wants:** more fps and steadier fps on the RTX 5080
+  (60+ is the aim), the picture as good as now or better. Open visual
+  items the owner raised: dark squares and sun sparkles, red/blue tree glow
+  at night (fix in, unverified at night), water slabs (tiled water
+  programs off), a rare crash outdoors. Test runs should move around (the
+  stand-in pad: W/A/S/D walk, J/L/I/K camera, Enter = A), not stand still,
+  and send the owner screenshots while they run.
+- **State:** `coolfox-speed` (worktree `victory-coolfox`) has everything
+  below; `primary` on GitHub has it merged. The launcher
+  `runtime\build\Launch VIctory (cool_fox).bat` (outside Git) sets
+  `VICTORY_PORT_GUARD=1`, `VICTORY_PORT_JOURNAL=1`,
+  `VICTORY_FRAME_INTERVAL_MS=16.667` (FPS_LIMIT commented out) and
+  `VICTORY_WIDE_SPIN=100`. The save area: 23 fps, 43.9 ms a frame (diag
+  build). A walking run with the full launcher (scripted route `walk8`) was
+  started at 12:17 and not looked at.
+- **Next targets:** the refreshes (13 ms a frame) and the copies in the
+  card's memory (6.4 ms); `VICTORY_UP_QUEUE` alone in a longer A/B; item 7
+  (texture uploads in the prelude, against late textures and flicker).
+
 What needs doing, and where each stands (one line per item; update it when
 it moves):
 
@@ -419,7 +447,8 @@ it moves):
 | 6 | Ports 1 and 2 (`VICTORY_PORT_CONSTANTS`, `_DESCRIPTORS`; already in cool_fox) | -4 to -20 ms | 1: the card reads the 174 MB constants heap over the bus, frames 3x as long; 2 without 1: posterized | **found why, not fixable as written** (next step 1 below): stays off on NVIDIA |
 | 7 | Textures uploaded in the submission's prelude (`5d6bd841`): frame order, flicker | - | - | to look at |
 | 8 | `VICTORY_OUTPUT` (`e151e71f`, `45cad4c5`) | -16 ms card time (Series X) | the launcher already runs Series S (1080p); the frame is set by the CPU | not needed now |
-| 9 | `VICTORY_PORT_GUARD_PLAN` (part of port 6; refresh planning on side threads, from 4,096 steps) | - | on with port 6 by default | A/B it alone next |
+| 9 | `VICTORY_PORT_GUARD_PLAN` (part of port 6; refresh planning on side threads, from 4,096 steps) | - | on with port 6 by default | in the port 6 A/B above |
+| 10 | cool_fox's own switches that were off, A/B'd together (27 Nov 12:04, `VICTORY_AB=8` with three switches, 65 phases, 8-9 rounds each, no crash) | - | `VICTORY_WIDE_SPIN` (refresh helpers wait awake 100 us): median -0.1 ms, p90 57.1 -> 55.9, better in 7 of 9; `VICTORY_UP_QUEUE`: mean -1.2 ms but faster in 2 of 9 only; `VICTORY_JOIN_BARRIERS`: slower in 7 of 8 | **`VICTORY_WIDE_SPIN=100` on in the launcher** (steadier frames); the other two off. `UP_QUEUE` might be worth a longer A/B alone |
 
 Branches after round 8: `coolfox-speed` (worktree `victory-coolfox`, what
 `Launch VIctory (cool_fox).bat` runs) has items 1-4. `primary` on GitHub

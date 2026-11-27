@@ -323,16 +323,25 @@ void hold_reflections(uint3 at : SV_DispatchThreadID) {
     float2 grid = (float2(at.xy) + 0.5) / float2(width, height) * float2(CX, CY) - 0.5;
     int2 base = int2(floor(grid));
     float2 f = frac(grid);
-    float local = 0.0;
+    float3 local = 0.0;
     for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
         int2 q = clamp(base + int2(x, y), int2(0, 0), int2(CX - 1, CY - 1));
         float weight = (x ? f.x : 1.0 - f.x) * (y ? f.y : 1.0 - f.y);
-        local += dot(cells[q.y * CX + q.x].rgb, LUMA) * weight;
+        local += cells[q.y * CX + q.x].rgb * weight;
     }
     // Avoid using a distant bright window as the limit for the whole room.
-    float reference = constant > 0.0 ? constant : max(local, 0.25 * dot(cells[CELLS].rgb, LUMA));
+    float reference = constant > 0.0 ? constant : max(dot(local, LUMA), 0.25 * dot(cells[CELLS].rgb, LUMA));
     float cap = max(reference, 0.01) * follow;
-    if (peak > cap) light[at.xy] = pack(reflected * (cap / peak));
+    float3 held = reflected * min(1.0, cap / max(peak, 1e-6));
+    if (most > 0.0 && constant == 0.0) {
+        // Keep the neutral reflection and color supported by local scene
+        // radiance. Cap isolated saturated values from the probe history.
+        float neutral = min(held.r, min(held.g, held.b));
+        float local_neutral = min(local.r, min(local.g, local.b));
+        float3 allowance = 0.2 * cap + follow * max(local - local_neutral, 0.0);
+        held = min(held, neutral + allowance);
+    }
+    if (any(held < reflected)) light[at.xy] = pack(held);
 }
 
 [RootSignature(RS)]

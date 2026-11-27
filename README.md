@@ -66,6 +66,8 @@ Install CMake 3.24 or newer and the Visual Studio C++ build tools with MASM. Bui
 .\scripts\Build-OmegaNvidia.ps1 -TrainerGameDirectory '<Xbox game folder>'
 ```
 
+The trainer starts with **Status line** off. To show the position, heading, and speed again, enable it in the trainer's **Settings** menu.
+
 The build installs the pinned ScriptHook VI revision when the trainer files are missing. In Omega Launcher, select **Use NVIDIA runner** on **Home**, then **Enable trainer** on **Mods**. In offline story gameplay, press **F4** to open the trainer. Use the arrow keys to navigate, Enter to select and Backspace to go back. In **F1**, set **Game Keyboard** to Off to stop Victory from sending keyboard input to the game and its emulated controller. This applies live. ScriptHook VI has its own keyboard handler. The trainer targets Xbox build 1.0.2.1. [ScriptHook VI](https://github.com/modpapi/scripthook-vi)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer

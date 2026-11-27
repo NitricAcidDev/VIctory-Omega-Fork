@@ -457,6 +457,7 @@ if ($TrainerGameDirectory) {
     $trainerRoot = Join-Path $TrainerGameDirectory 'shvi'
     if (!(Test-Path -LiteralPath (Join-Path $trainerRoot 'shvi_core.dll') -PathType Leaf) -or
         !(Test-Path -LiteralPath (Join-Path $trainerRoot 'plugins/trainer.asi') -PathType Leaf) -or
+        !(Test-Path -LiteralPath (Join-Path $trainerRoot 'omega-status-line-off') -PathType Leaf) -or
         !(Test-Path -LiteralPath (Join-Path $trainerRoot 'natives/1794606036.json') -PathType Leaf)) {
         & (Join-Path $PSScriptRoot 'Install-ScriptHookVI.ps1') -GameDirectory $TrainerGameDirectory
     }

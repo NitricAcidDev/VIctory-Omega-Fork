@@ -90,6 +90,28 @@ if ($Nvidia) { $paths += 'VICTORY_STREAMLINE_DIR' }
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
 if ($Nvidia) {
+    if ($Trainer) {
+        $trainerRoot = Join-Path (Split-Path -LiteralPath $Exe) 'shvi'
+        $trainerFile = Join-Path $trainerRoot 'plugins/trainer.asi'
+        if (Test-Path -LiteralPath "$trainerFile.next-hashes" -PathType Leaf) {
+            if (Get-Process victory -ErrorAction SilentlyContinue) {
+                throw 'Close Victory normally before installing the staged trainer update.'
+            }
+            $hashes = [IO.File]::ReadAllLines("$trainerFile.next-hashes")
+            $current = (Get-FileHash -LiteralPath $trainerFile -ErrorAction Stop).Hash
+            if ($hashes.Length -ne 2) { throw 'The staged trainer update is incomplete.' }
+            if ($current -ne $hashes[1]) {
+                $pendingHash = (Get-FileHash -LiteralPath "$trainerFile.next" -ErrorAction Stop).Hash
+                if ($current -ne $hashes[0] -or $pendingHash -ne $hashes[1]) {
+                    throw 'The trainer files changed after the update was staged.'
+                }
+                $backup = $trainerFile + '.' + [Guid]::NewGuid().ToString('N') + '.backup'
+                [IO.File]::Replace("$trainerFile.next", $trainerFile, $backup)
+            }
+            [IO.File]::WriteAllText((Join-Path $trainerRoot 'omega-status-line-off'), $hashes[1])
+            [IO.File]::Delete("$trainerFile.next-hashes")
+        }
+    }
     $pending = Join-Path $directory 'victory.next'
     if ([IO.File]::Exists($pending)) {
         if (Get-Process victory -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $victory }) {

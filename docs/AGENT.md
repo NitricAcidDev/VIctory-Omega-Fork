@@ -434,11 +434,16 @@ patched (3 of 3 loads), 21-22 fps, picture right, no crash.
 Next, in this order:
 
 1. Item 6: why the card reading title memory in place (port 1) is 3x slower
-   on the RTX 5080. Look at the heap the 174 MB constants heap is made in
-   (`port.rs`, `OpenExistingHeapFromAddress` / custom heap, L0 system
-   memory); NVIDIA may read it uncached over the bus. With resizable BAR a
-   `D3D12_HEAP_TYPE_GPU_UPLOAD` heap (card memory the CPU writes) is the
-   NVIDIA way; then port 5 (item 5, -4.7 ms on AMD) can follow.
+   on the RTX 5080. Found (27 Nov, reading only): port 1 opens the title's
+   own memory with `OpenExistingHeapFromAddress1` (`inplace.rs:240`; the
+   heap is `CUSTOM`, `WRITE_BACK`, `MEMORY_POOL_L0`, `inplace.rs:1095`), so
+   every constant the card reads crosses PCIe, snooped; the 7900 XTX takes
+   it, the RTX 5080 does not. The NVIDIA way would be the 174 MB constants
+   region backed by card memory the CPU writes (resizable BAR,
+   `D3D12_HEAP_TYPE_GPU_UPLOAD`) handed to the title as its allocation:
+   check first that the title never reads that region back (CPU reads of
+   such memory are uncached) and that nothing needs write watches or guards
+   on it. Then port 5 (item 5, -4.7 ms on AMD) can follow.
 2. Item 7 (texture uploads in the submission prelude): may fix late
    textures and flicker.
 3. A fresh profile of `victory-submit` (`prof.ps1` in the scratchpad,

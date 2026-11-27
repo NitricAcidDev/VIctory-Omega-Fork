@@ -104,6 +104,7 @@ if ($Nvidia) {
         VICTORY_MENU_FPS = $(if ($FrameLimit -eq 'unlimited') { '1000' } elseif ($FrameLimit) { $FrameLimit } else { '30' })
         VICTORY_BVH_BUILDER = $(if ($RayTracing) { '1' } else { '' })
         VICTORY_AMBIENT = $(if ($estimate) { '0.8' } else { '' })
+        VICTORY_AMBIENT_ONCE = $(if ($estimate) { '1' } else { '' })
         VICTORY_AMBIENT_AIR = $(if ($estimate) { '1.5' } else { '' })
         VICTORY_AMBIENT_SPECULAR = $(if ($estimate) { '1' } else { '' })
         VICTORY_WINDOW_KB = $(if ($LowMemory) { '2048' } else { '' })

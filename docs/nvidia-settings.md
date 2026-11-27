@@ -25,7 +25,7 @@ selected options again when you start from the launcher.
 | Fog Cap | Limits the lighting fed into the fog estimate. |
 | Ray Tracing | Enables the experimental acceleration-structure and ray tracing path. |
 | Water Light | Enables tiled volumetric water lighting. It can produce green or dark tiles on 32-lane NVIDIA hardware. |
-| Heat Haze and Decal Defrag | Toggles two translated passes that can smear the image when enabled. |
+| Heat Haze and Decal Defrag | Skips both passes by default. **Decals Only** runs decal atlas defragmentation while keeping heat haze off. Save and restart to compare persistent black sign markings in the same scene. |
 | Early Depth Test | Allows supported translated pixel shaders to reject hidden pixels before shading. |
 | Skip Big Copy-Backs | Avoids some large GPU-to-CPU copies for write-combined memory. |
 | Soft Views | Keeps eligible resource views in Victory's bookkeeping and materializes them when needed, reducing waits while copying. |

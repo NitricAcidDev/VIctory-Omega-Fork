@@ -160,11 +160,14 @@ $fullscreenMenu = {
 Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     param($text)
     $text = & $fullscreenMenu $text
-    $text.Replace('    // The layer''s switches.', @'
+    $text = $text.Replace('    // The layer''s switches.', @'
     Item { var: "VICTORY_GAME_KEYBOARD", label: "GAME KEYBOARD", values: &[("", "ON"), ("0", "OFF")], live: true },
     // The layer's switches.
 '@)
+    $text.Replace('("02384a60fda6f2d0,731a39171b568298", "LEFT OUT"), ("", "RUN (SLOWER, SMEARS)")',
+        '("02384a60fda6f2d0,731a39171b568298", "LEFT OUT"), ("731a39171b568298", "DECALS ONLY"), ("", "RUN BOTH")')
 } -Previous $fullscreenMenu -PreviousHash @(
+    '99E2B322E28E3C6959631F2FD075FF0D4F238AEE183772168BE3D6926403278D',
     '91A2717E47DD1C717E6FF134181A7087BAE6A32F0FCA3035E58DE17D79A544DB',
     'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
 )

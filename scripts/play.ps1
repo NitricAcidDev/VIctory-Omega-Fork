@@ -80,6 +80,13 @@ if ($Nvidia) { $paths += 'VICTORY_STREAMLINE_DIR' }
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
 if ($Nvidia) {
+    $pending = Join-Path $directory 'victory.next'
+    if ([IO.File]::Exists($pending)) {
+        if (Get-Process victory -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $victory }) {
+            throw 'Close Victory normally before starting the updated NVIDIA runner.'
+        }
+        [IO.File]::Replace($pending, $victory, [NullString]::Value)
+    }
     # The two renderers use separate compiled caches and the same title saves.
     $env:VICTORY_CACHE_DIR = Join-Path $env:LOCALAPPDATA 'victory/cache-nvidia'
     $sdk = Join-Path $env:LOCALAPPDATA 'victory/nvidia-sdk/Streamline/bin/x64'

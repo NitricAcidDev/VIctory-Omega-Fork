@@ -68,6 +68,33 @@ Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     param($text)
     $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
 }
+Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
+    param($text)
+    $luma = 'static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);'
+    $text = $text.Replace($luma, $luma + "`n" + @'
+
+// Give reused probe color a small allowance in every channel and more
+// where nearby scene radiance supports it. Neutral light keeps its value.
+float3 bound_probe_color(float3 sample, float3 local_light, float gain) {
+    float neutral = min(sample.r, min(sample.g, sample.b));
+    float local_neutral = min(local_light.r, min(local_light.g, local_light.b));
+    float3 allowance = 0.25 * dot(local_light, LUMA) + gain * (local_light - local_neutral);
+    return min(sample, neutral + allowance);
+}
+'@)
+    $text = $text.Replace('    float cap = air * lerp(dot(cells[CELLS].rgb, LUMA), dot(seen_there, LUMA), far);', @'
+    float3 local_light = air * max(lerp(cells[CELLS].rgb, seen_there, far), 0.0);
+    float cap = dot(local_light, LUMA);
+'@)
+    $text = $text.Replace('    if (has > cap) scattered[at] = c * (cap / has);', @'
+    float3 held = c * min(1.0, cap / max(has, 1e-6));
+    held = bound_probe_color(held, local_light, 1.0);
+    if (any(held < c)) scattered[at] = held;
+'@)
+    $text = $text.Replace('    reflected[at.xy] = lerp(found, was, constant);', '    reflected[at.xy] = lerp(found, bound_probe_color(was, found, 1.0), constant);')
+    $text = $text -replace '(?s)    // Magenta/violet garbage the probes.*?(?=    // What the program left counts)', ''
+    $text.Replace('    float3 now = max(was, found);', '    float3 now = max(bound_probe_color(was, found, most), found);')
+}
 $launcherOptions = {
     param($text)
     $text.Replace(
@@ -96,13 +123,18 @@ try {
 $target = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner/omega-options-v1'
 $null = [IO.Directory]::CreateDirectory($target)
 $active = Join-Path $target 'victory.exe'
+$pending = Join-Path $target 'victory.next'
+$running = Get-Process victory -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $active }
+$install = if ($running) { $pending } else { $active }
 $stage = Join-Path $target ('.omega-install-' + [Guid]::NewGuid())
 try {
     [IO.File]::Copy((Join-Path $SourceDir 'target/release/victory.exe'), $stage)
-    if ([IO.File]::Exists($active)) {
-        [IO.File]::Replace($stage, $active, [NullString]::Value)
+    if ([IO.File]::Exists($install)) {
+        [IO.File]::Replace($stage, $install, [NullString]::Value)
     } else {
-        [IO.File]::Move($stage, $active)
+        [IO.File]::Move($stage, $install)
     }
+    if ($running) { Write-Output 'The update will be installed at the next launch.' }
+    else { [IO.File]::Delete($pending) }
 } finally { [IO.File]::Delete($stage) }
 [IO.File]::WriteAllText((Join-Path $target 'omega-branding-v1'), $commit)

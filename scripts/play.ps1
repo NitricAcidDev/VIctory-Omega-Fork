@@ -3,6 +3,8 @@
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -Console      series-s for 1080p (default) or series-x for the 4K profile
 # -RayTracing   the title's experimental ray-traced indirect light
+# -ShadowBoost  lift the darkest areas with ray tracing off
+# -LowMemory    reclaim idle RAM copies above 28 GiB of private commit
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
@@ -10,6 +12,8 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$Safe,
     [switch]$RayTracing,
+    [switch]$ShadowBoost,
+    [switch]$LowMemory,
     [switch]$OriginalGraphics,
     [switch]$PerformanceLog,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
@@ -31,16 +35,20 @@ if ($Safe) {
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 if (!$OriginalGraphics -and !$RayTracing) {
     $settings.VICTORY_AMBIENT = '0.8'
-    $settings.VICTORY_AMBIENT_FLOOR = '0.09'
+    if ($ShadowBoost) { $settings.VICTORY_AMBIENT_FLOOR = '0.09' }
     $settings.VICTORY_AMBIENT_PROBE_LIMIT = '2'
     $settings.VICTORY_AMBIENT_AIR = '1.5'
+}
+if ($LowMemory) {
+    $settings.VICTORY_RAM_TARGET_MIB = '28672'
+    $settings.VICTORY_WINDOW_KB = '2048'
 }
 if ($PerformanceLog) { $settings.VICTORY_LOG = 'warn,victory_gpu::host=info,victory_gpu::pipeline=info,victory_gpu::ambient=info' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
-if (-not (Test-Path $victory)) { Write-Host "No $victory. Build it first (README.md)."; return }
-if (-not (Test-Path $Exe)) { Write-Host "No $Exe."; return }
+if (-not (Test-Path -LiteralPath $victory -PathType Leaf)) { throw "No $victory. Build it first (README.md)." }
+if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "No $Exe." }
 # (Other settings left over in this window go; where your files are stays.)
 $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
@@ -48,3 +56,4 @@ foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 $Exe = (Resolve-Path $Exe).Path
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
 try { & $victory run $Exe --console $Console --execute } finally { Pop-Location }
+exit $LASTEXITCODE

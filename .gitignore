@@ -76,3 +76,6 @@
 *.swp
 Thumbs.db
 .DS_Store
+/tools/omega-launcher/bin/
+/tools/omega-launcher/obj/
+Omega Launcher.lnk

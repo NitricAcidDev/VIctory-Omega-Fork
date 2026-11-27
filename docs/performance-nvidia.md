@@ -14,4 +14,6 @@ The house trace ranged from 1.5 to 12 FPS in the selected gameplay intervals. Me
 
 The house trace had no pending pipeline builds in the sampled gameplay intervals, and it reported exhaustion of the shader-visible descriptor slots followed by dropped draws. It recorded the radiance, diffuse resolve, and volumetric lighting corrections. CPU buffer refresh and copy-back were recurring costs, and submission prep alone exceeded the 30 FPS budget. The timing counters cover overlapping work, so their values cannot be added to reconstruct frame time.
 
+The follow-up Series S run with audio tracing active recorded 8.9–11.9 FPS across nine late gameplay intervals. Submission preparation took 41–51 ms per frame and buffer copies uploaded 67–82 MB per frame. The pipeline backlog was clear during those intervals. In the same stretch, the mesh dispatch diagnostics recorded zero records rejected by the per-list work budget. The camera moved during the follow-up, so these ranges describe the bottleneck and do not measure the effect of the renderer changes.
+
 For a repeat, launch `scripts/play.ps1` with `-Console series-s -Build diag -PerformanceLog`, then save timings for the same fixed camera view and pan after the pipeline queue clears. Record the selected graphics profile, driver, save checkpoint, and cache state with the result.

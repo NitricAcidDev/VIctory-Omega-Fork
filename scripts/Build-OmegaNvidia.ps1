@@ -73,10 +73,17 @@ Update-NvidiaSource 'crates/victory-gpu/src/host.rs' {
     $text.Replace("            Some(instance.into()),`n            None,`n        )", "            Some(instance.into()),`n            None,`n        )?;`n        crate::omega_window::brand(hwnd.0);`n        Ok(hwnd)")
 }
 # Accept the exact generated menu from the retired Omega World preview.
-Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+$graphicsMenuBranding = {
     param($text)
     $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
-} -PreviousHash 'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
+}
+Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+    param($text)
+    $text = & $graphicsMenuBranding $text
+    $cap = '("30", "30 (THE GAME)")], live: false },'
+    if (!$text.Contains($cap)) { throw 'Could not find the NVIDIA frame-rate cap choices.' }
+    $text.Replace($cap, '("30", "30 (THE GAME)"), ("15", "15 FPS")], live: false },')
+} -Previous $graphicsMenuBranding -PreviousHash 'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
 Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
     param($text)
     $luma = 'static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);'

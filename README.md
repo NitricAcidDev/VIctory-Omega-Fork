@@ -50,16 +50,19 @@ Reopen Omega Launcher, check **Use NVIDIA runner**, and select **Launch game**. 
 
 For a fresh NVIDIA launch, Omega Launcher applies the console, ray tracing, graphics, low-memory and diagnostics choices. Game default uses 30 FPS. Original graphics uses the game's upscaler and lighting. F1 still saves its settings and can restart the game when requested. The launcher skips the automatic first-run restart and gives streamed textures more time to catch up when the queue is large. Series X defaults to 1440p in the NVIDIA runner. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
 
+For NVIDIA shader precompilation with the selected launch profile, add `-PreloadShaders` to the command above. It uses the NVIDIA runner and its cache, then starts the game. The **Preload Shaders** action in F1 uses the same NVIDIA preloader.
+
+**Water Light** controls the experimental tiled water lighting pass. It starts off in Omega Launcher because the pass can cause dark or green tiles on NVIDIA. Use it to compare the same shoreline with both settings. See the [NVIDIA settings reference](docs/nvidia-settings.md) for the other F1 options.
+
 ### ScriptHook VI trainer
 
 Install CMake 3.24 or newer and the Visual Studio C++ build tools with MASM. Build the NVIDIA runner and install the trainer beside your Xbox game executable:
 
 ```powershell
-.\scripts\Build-OmegaNvidia.ps1
-.\scripts\Install-ScriptHookVI.ps1 -GameDirectory '<Xbox game folder>'
+.\scripts\Build-OmegaNvidia.ps1 -TrainerGameDirectory '<Xbox game folder>'
 ```
 
-Select **Use NVIDIA runner** in Omega Launcher. In offline story gameplay, press **F4** to open the trainer. Use the arrow keys to navigate, Enter to select and Backspace to go back. **F1** opens Omega graphics settings. The trainer targets Xbox build 1.0.2.1. [ScriptHook VI](https://github.com/modpapi/scripthook-vi)
+The build installs the pinned ScriptHook VI revision when the trainer files are missing. Select **Use NVIDIA runner** in Omega Launcher. In offline story gameplay, press **F4** to open the trainer. Use the arrow keys to navigate, Enter to select and Backspace to go back. In **F1**, set **Game Keyboard** to Off to stop Victory from sending keyboard input to the game and its emulated controller. This applies live. ScriptHook VI has its own keyboard handler. The trainer targets Xbox build 1.0.2.1. [ScriptHook VI](https://github.com/modpapi/scripthook-vi)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
@@ -170,6 +173,17 @@ commits taken from elsewhere name the commit and its author.
   every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
   reads into title memory.
 - **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
+- **[trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)**
+  and its contributors supplied the optional NVIDIA runner, F1 graphics menu,
+  and NVIDIA shader and pipeline preloader.
+- **[modpapi/ScriptHook VI](https://github.com/modpapi/scripthook-vi)** supplied
+  the hosted startup interface and optional offline story trainer.
+- **[NVIDIA Streamline](https://github.com/NVIDIA-RTX/Streamline)** provides the
+  NVIDIA runner's DLSS and Frame Generation integration.
+- **[AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)**
+  supplies the optional FSR 3 Frame Generation path in the NVIDIA runner.
+- **[dashdogy/MFG Unlocker](https://github.com/dashdogy/MFG-Unlocker)** is the
+  third-party mod offered by the NVIDIA runner's optional MFG Unlocker setting.
 - **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
   title behaves under another layer; no code of it is here.
 - This fork's changes were made with [Claude Code](https://claude.com/claude-code).

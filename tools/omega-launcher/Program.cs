@@ -37,6 +37,7 @@ internal sealed class Launcher : Form
     private readonly CheckBox memory = new();
     private readonly CheckBox diagnostics = new();
     private readonly CheckBox audioTrace = new();
+    private readonly CheckBox waterLight = new();
     private readonly CheckBox nvidia = new();
     private readonly ComboBox frameLimit = new();
     private readonly ComboBox dlss = new();
@@ -88,6 +89,7 @@ internal sealed class Launcher : Form
         var saved = ReadSettings();
         frameLimit.SelectedIndex = Math.Max(0, Array.IndexOf(FrameLimits, saved.FrameLimit));
         audioTrace.Checked = saved.AudioTrace;
+        waterLight.Checked = saved.WaterLight;
         nvidia.Checked = saved.Nvidia && NvidiaInstalled;
         dlss.SelectedIndex = Math.Max(0, Array.IndexOf(DlssModes, saved.Dlss ?? "quality"));
         frameGeneration.SelectedIndex = Math.Max(0, Array.IndexOf(FrameMultipliers, saved.FrameGeneration));
@@ -200,7 +202,8 @@ internal sealed class Launcher : Form
         options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         var choices = new[] {
             (original, "Original graphics"), (shadowBoost, "Shadow boost"), (memory, "Low-memory mode"),
-            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing") };
+            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing"), (waterLight, "Water Light") };
+        waterLight.AccessibleDescription = "Enables experimental NVIDIA water lighting. May cause dark or green water tiles.";
         for (int index = 0; index < choices.Length; index++)
         {
             var (check, label) = choices[index];
@@ -354,6 +357,7 @@ internal sealed class Launcher : Form
 
     private void RefreshStatus()
     {
+        waterLight.Enabled = nvidia.Checked;
         shadowBoost.Enabled = !nvidia.Checked && !rays.Checked && !original.Checked;
         dlss.Enabled = nvidia.Checked && !original.Checked;
         frameGeneration.Enabled = dlss.Enabled && dlss.SelectedIndex > 0;
@@ -392,7 +396,7 @@ internal sealed class Launcher : Form
             var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
                 original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked,
                 FrameLimits[frameLimit.SelectedIndex], audioTrace.Checked, nvidia.Checked,
-                DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex]);
+                DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex], waterLight.Checked);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {
@@ -407,6 +411,7 @@ internal sealed class Launcher : Form
             if (selection.Nvidia)
             {
                 start.ArgumentList.Add("-Nvidia");
+                if (selection.WaterLight) start.ArgumentList.Add("-WaterLight");
                 start.ArgumentList.Add("-Dlss");
                 start.ArgumentList.Add(selection.Dlss!);
                 start.ArgumentList.Add("-FrameGeneration");
@@ -518,5 +523,5 @@ internal sealed class Launcher : Form
     private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false,
         bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false,
         string? FrameLimit = null, bool AudioTrace = false, bool Nvidia = false, string? Dlss = null,
-        int FrameGeneration = 0);
+        int FrameGeneration = 0, bool WaterLight = false);
 }

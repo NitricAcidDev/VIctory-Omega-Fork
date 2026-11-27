@@ -1,6 +1,7 @@
 # Build the NVIDIA runner with Omega window branding. The checkout and binary stay outside the repo.
 param(
-    [string]$SourceDir = (Join-Path $env:LOCALAPPDATA 'victory/nvidia-source')
+    [string]$SourceDir = (Join-Path $env:LOCALAPPDATA 'victory/nvidia-source'),
+    [string]$TrainerGameDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,7 +114,7 @@ $frameRateMenu = {
     if (!$text.Contains($cap)) { throw 'Could not find the NVIDIA frame-rate cap choices.' }
     $text.Replace($cap, '("30", "30 (THE GAME)"), ("15", "15 FPS")], live: false },')
 }
-Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+$fullscreenMenu = {
     param($text)
     $text = & $frameRateMenu $text
     $text = $text.Replace('VK_ESCAPE, VK_F1, VK_LEFT', 'VK_ESCAPE, VK_F1, VK_F11, VK_LEFT')
@@ -155,10 +156,57 @@ Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
 
     /// Records the copy of the box onto
 '@)
-} -Previous $frameRateMenu -PreviousHash @(
+}
+Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+    param($text)
+    $text = & $fullscreenMenu $text
+    $text.Replace('    // The layer''s switches.', @'
+    Item { var: "VICTORY_GAME_KEYBOARD", label: "GAME KEYBOARD", values: &[("", "ON"), ("0", "OFF")], live: true },
+    // The layer's switches.
+'@)
+} -Previous $fullscreenMenu -PreviousHash @(
     '91A2717E47DD1C717E6FF134181A7087BAE6A32F0FCA3035E58DE17D79A544DB',
     'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
 )
+Update-NvidiaSource 'crates/victory-hle/src/modules/gameinput.rs' {
+    param($text)
+    $check = '            if victory_gpu::SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {'
+    if (!$text.Contains($check)) { throw 'Could not find the NVIDIA game keyboard input gate.' }
+    $text.Replace($check, @'
+            if victory_gpu::SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+                || std::env::var_os("VICTORY_GAME_KEYBOARD").is_some_and(|value| value == "0")
+            {
+'@)
+}
+Update-NvidiaSource 'crates/victory-gpu/src/texture.rs' {
+    param($text)
+    $original = @'
+        let read = with_read(size, |read| {
+            if !crate::host::read_into(self.memory, read) {
+                return false;
+            }
+'@
+    $start = $text.IndexOf('    fn refresh_unlocked(')
+    $at = $text.IndexOf($original, $start)
+    if ($at -lt 0) { throw 'Could not find the NVIDIA unlocked texture refresh.' }
+    $retry = @'
+        let read = with_read(size, |read| {
+            // Retry a cold, small upload while title memory is being remapped.
+            // Keep the usual single read for warm or large textures.
+            let mut complete = crate::host::read_into(self.memory, read);
+            if !complete && last.hash.is_none() && size <= 256 * 1024 {
+                for _ in 0..2 {
+                    std::thread::yield_now();
+                    complete = crate::host::read_into(self.memory, read);
+                    if complete { break; }
+                }
+            }
+            if !complete {
+                return false;
+            }
+'@
+    $text.Remove($at, $original.Length).Insert($at, $retry)
+}
 Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
     param($text)
     $text = $text.Replace(
@@ -350,3 +398,11 @@ try {
     else { [IO.File]::Delete($pending) }
 } finally { [IO.File]::Delete($stage) }
 [IO.File]::WriteAllText((Join-Path $target 'omega-branding-v1'), $commit)
+if ($TrainerGameDirectory) {
+    $trainerRoot = Join-Path $TrainerGameDirectory 'shvi'
+    if (!(Test-Path -LiteralPath (Join-Path $trainerRoot 'shvi_core.dll') -PathType Leaf) -or
+        !(Test-Path -LiteralPath (Join-Path $trainerRoot 'plugins/trainer.asi') -PathType Leaf) -or
+        !(Test-Path -LiteralPath (Join-Path $trainerRoot 'natives/1794606036.json') -PathType Leaf)) {
+        & (Join-Path $PSScriptRoot 'Install-ScriptHookVI.ps1') -GameDirectory $TrainerGameDirectory
+    }
+}

@@ -19,6 +19,8 @@ param(
     [switch]$PerformanceLog,
     [switch]$AudioTrace,
     [switch]$Nvidia,
+    [switch]$WaterLight,
+    [switch]$PreloadShaders,
     [ValidateSet('off', 'dlaa', 'quality', 'balanced', 'performance')][string]$Dlss = 'quality',
     [ValidateSet(0, 2, 3, 4, 5, 6)][int]$FrameGeneration = 0,
     [ValidateSet('15', '30', '60', 'unlimited')][string]$FrameLimit,
@@ -27,6 +29,9 @@ param(
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
+if (!$Nvidia -and ($WaterLight -or $PreloadShaders)) {
+    throw 'Water Light and shader preload require -Nvidia.'
+}
 $settings = @{
     VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
     VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'
@@ -103,6 +108,7 @@ if ($Nvidia) {
         VICTORY_MENU_FG_TYPE = 'dlss'
         VICTORY_MENU_FPS = $(if ($FrameLimit -eq 'unlimited') { '1000' } elseif ($FrameLimit) { $FrameLimit } else { '30' })
         VICTORY_BVH_BUILDER = $(if ($RayTracing) { '1' } else { '' })
+        VICTORY_WATER_LIGHT = $(if ($WaterLight) { '1' } else { '' })
         VICTORY_AMBIENT = $(if ($estimate) { '0.8' } else { '' })
         VICTORY_AMBIENT_ONCE = $(if ($estimate) { '1' } else { '' })
         VICTORY_AMBIENT_AIR = $(if ($estimate) { '1.5' } else { '' })
@@ -115,6 +121,7 @@ if ($Nvidia) {
     }
     $env:VICTORY_OMEGA_LAUNCH = ($options.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join [char]10
     $launch = @('play', $Exe)
+    if ($PreloadShaders) { $launch += '--preload' }
     foreach ($key in $More.Keys) { $launch += '--set', "$key=$($More[$key])" }
     try { & $victory @launch } finally { Remove-Item Env:VICTORY_OMEGA_LAUNCH }
     exit $LASTEXITCODE

@@ -77,6 +77,7 @@ internal sealed class Launcher : Form
         original.Checked = saved.OriginalGraphics;
         shadowBoost.Checked = saved.ShadowBoost;
         shadowBoost.AccessibleDescription = "Lifts dark areas when ray tracing and Original graphics are off.";
+        memory.AccessibleDescription = "Uses smaller memory windows for buffer copies.";
         memory.Checked = saved.LowMemory;
         diagnostics.Checked = saved.Diagnostics;
         diagnostics.CheckedChanged += (_, _) => RefreshStatus();
@@ -395,6 +396,10 @@ internal sealed class Launcher : Form
         var root = LocalRoot();
         try
         {
+            var current = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "victory", "data", "last-game-executable.txt");
+            if (File.Exists(current))
+                return Path.GetDirectoryName(File.ReadAllText(current).Trim());
             return root is null ? null : Path.GetDirectoryName(
                 File.ReadAllText(Path.Combine(root, "data", "last-game-executable.txt")).Trim());
         }
@@ -406,8 +411,8 @@ internal sealed class Launcher : Form
         var root = LocalRoot();
         if (root is null)
             return;
-        start.Environment.TryAdd("VICTORY_DATA_DIR", Path.Combine(root, "data"));
-        start.Environment.TryAdd("VICTORY_CACHE_DIR", Path.Combine(root, "cache", "cache-coolfox"));
+        start.ArgumentList.Add("-LegacyRoot");
+        start.ArgumentList.Add(root);
     }
 
     private static Settings ReadSettings()

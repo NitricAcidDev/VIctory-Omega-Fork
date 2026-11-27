@@ -4,7 +4,7 @@
 # -Console      series-s for 1080p (default) or series-x for the 4K profile
 # -RayTracing   the title's experimental ray-traced indirect light
 # -ShadowBoost  lift the darkest areas with ray tracing off
-# -LowMemory    reclaim idle RAM copies above 28 GiB of private commit
+# -LowMemory    use smaller memory windows for buffer copies
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
@@ -16,6 +16,7 @@ param(
     [switch]$LowMemory,
     [switch]$OriginalGraphics,
     [switch]$PerformanceLog,
+    [string]$LegacyRoot,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
@@ -40,7 +41,6 @@ if (!$OriginalGraphics -and !$RayTracing) {
     $settings.VICTORY_AMBIENT_AIR = '1.5'
 }
 if ($LowMemory) {
-    $settings.VICTORY_RAM_TARGET_MIB = '28672'
     $settings.VICTORY_WINDOW_KB = '2048'
 }
 if ($PerformanceLog) { $settings.VICTORY_LOG = 'warn,victory_gpu::host=info,victory_gpu::pipeline=info,victory_gpu::ambient=info' }
@@ -49,6 +49,13 @@ foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
 if (-not (Test-Path -LiteralPath $victory -PathType Leaf)) { throw "No $victory. Build it first (README.md)." }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "No $Exe." }
+if ($LegacyRoot) {
+    $data = if (!$env:VICTORY_DATA_DIR) { Join-Path $env:LOCALAPPDATA 'victory/data' }
+    $cache = if (!$env:VICTORY_CACHE_DIR) { Join-Path $env:LOCALAPPDATA 'victory/cache' }
+    & (Join-Path $PSScriptRoot 'Migrate-VictoryStorage.ps1') -LegacyRoot $LegacyRoot -DataDirectory $data -CacheDirectory $cache
+    if ($data) { $env:VICTORY_DATA_DIR = $data }
+    if ($cache) { $env:VICTORY_CACHE_DIR = $cache }
+}
 # (Other settings left over in this window go; where your files are stays.)
 $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }

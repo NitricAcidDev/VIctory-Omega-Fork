@@ -4,16 +4,23 @@
 
 ## Run Victory Omega on Windows
 
-Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti is the local Windows test card. Open PowerShell in the build folder and point the launcher at your own complete Xbox dump.
+Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti 16 GB is the local Windows test card. Select your own complete Xbox dump in Omega Launcher. To launch from PowerShell instead:
 
 ```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
-.\Play-VIctory.cmd pareto-residency
+.\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Build release
 ```
 
-The launcher selects the Series S 1080p profile with ray tracing off. F3 toggles the performance overlay. Alt+Enter toggles borderless fullscreen. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+Omega Launcher defaults to Series S at 1080p with ray tracing off. F3 toggles the performance overlay in a diagnostics build. Alt+Enter toggles borderless fullscreen. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
 
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
+To build from this checkout, install the pinned Rust toolchain, the MSVC C++ build tools with a Windows SDK, and the .NET 10 SDK. Run `.\Build-Victory.ps1` to build the game and launcher together. Add `-Diagnostics` to build the executable used by **FPS HUD and logs**.
+
+**Shadow boost** is off by default. Turn it on to lift the darkest areas of the diffuse lighting with ray tracing off. **Original graphics** bypasses the lighting and reflection corrections. **Low-memory mode** uses smaller buffer-copy windows.
+
+Omega Launcher uses `%LOCALAPPDATA%\victory\data` for saves and `%LOCALAPPDATA%\victory\cache` for cache files. When the shortcut starts in the legacy Victory root, the launcher copies missing files from its `data` and `cache\cache-coolfox` folders on first launch. The old files stay in place. PowerShell users can supply `-LegacyRoot <folder>` to select another legacy root. Explicit `VICTORY_DATA_DIR` and `VICTORY_CACHE_DIR` values take precedence.
+
+### NVIDIA fork features and Omega support
+
+The [VIctory-NVIDIA fork](https://github.com/trustno1-coder/VIctory-NVIDIA) offers DLSS Super Resolution, DLSS Frame Generation, and an F1 graphics menu. Omega has adopted selected renderer changes from that fork. DLSS and frame generation are available in VIctory-NVIDIA. This Omega build uses the existing game upscaling path. See the [RTX 5060 Ti performance report](docs/performance-nvidia.md) for measured gameplay FPS and frame times.
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.

@@ -31,7 +31,7 @@ The migrator copies missing files into `%LOCALAPPDATA%\victory\data` and `%LOCAL
 
 ### NVIDIA fork features and Omega support
 
-In Omega Launcher, **Omega Trainer** sets the runtime frame limit and can enable audio tracing for the next launch. The NVIDIA runner option enables DLSS Super Resolution and opens its graphics menu with **F1** in game. Use that menu for the DLSS mode and Frame Generation.
+Omega Launcher provides the frame limit and audio tracing on its main screen. Select the NVIDIA runner to enable the DLSS and Frame Generation controls. **F1** opens its graphics menu in game.
 
 Build the optional NVIDIA runner and install Streamline once:
 
@@ -40,13 +40,13 @@ Build the optional NVIDIA runner and install Streamline once:
 & "$env:LOCALAPPDATA\victory\nvidia-runner\omega-options-v1\victory.exe" get-dlss
 ```
 
-Reopen Omega Launcher, select **Omega Trainer**, enable the NVIDIA runner, then select **Apply**. You can also launch it directly with the command below. The build script uses the pinned release source. [VIctory-NVIDIA releases](https://github.com/trustno1-coder/VIctory-NVIDIA/releases)
+Reopen Omega Launcher, check **Use NVIDIA runner**, and select **Launch game**. You can also launch it directly with the command below. The build script uses the pinned release source. [VIctory-NVIDIA releases](https://github.com/trustno1-coder/VIctory-NVIDIA/releases)
 
 ```powershell
 .\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Console series-s -Nvidia -Dlss quality -FrameGeneration 0
 ```
 
-For a fresh NVIDIA launch, Omega Launcher applies the console, ray tracing, graphics, low-memory and diagnostics choices. Omega Trainer controls DLSS, Frame Generation and the frame limit. Game default uses 30 FPS. Original graphics uses the game's upscaler and lighting. F1 still saves its settings and can restart the game when requested. The launcher skips the automatic first-run restart and gives streamed textures more time to catch up when the queue is large. Series X defaults to 1440p in the NVIDIA runner. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
+For a fresh NVIDIA launch, Omega Launcher applies the console, ray tracing, graphics, low-memory and diagnostics choices. Game default uses 30 FPS. Original graphics uses the game's upscaler and lighting. F1 still saves its settings and can restart the game when requested. The launcher skips the automatic first-run restart and gives streamed textures more time to catch up when the queue is large. Series X defaults to 1440p in the NVIDIA runner. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.

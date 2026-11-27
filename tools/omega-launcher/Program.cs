@@ -36,15 +36,15 @@ internal sealed class Launcher : Form
     private readonly CheckBox shadowBoost = new();
     private readonly CheckBox memory = new();
     private readonly CheckBox diagnostics = new();
+    private readonly CheckBox audioTrace = new();
+    private readonly CheckBox nvidia = new();
+    private readonly ComboBox frameLimit = new();
+    private readonly ComboBox dlss = new();
+    private readonly ComboBox frameGeneration = new();
     private readonly Label status = new();
     private readonly Button play = new();
     private readonly Image logo;
     private bool launchPending;
-    private string? frameLimit;
-    private bool audioTrace;
-    private bool nvidia;
-    private int dlssMode = 2;
-    private int frameGeneration;
     private static readonly string?[] FrameLimits = [null, "15", "30", "60", "unlimited"];
     private static readonly string[] DlssModes = ["off", "dlaa", "quality", "balanced", "performance"];
     private static readonly int[] FrameMultipliers = [0, 2, 3, 4, 5, 6];
@@ -58,8 +58,8 @@ internal sealed class Launcher : Form
         repo = FindCheckout();
 
         Text = "Omega Launcher";
-        ClientSize = new Size(780, 590);
-        MinimumSize = new Size(700, 615);
+        ClientSize = new Size(780, 704);
+        MinimumSize = new Size(700, 729);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(22, 16, 30);
         ForeColor = Ink;
@@ -68,26 +68,28 @@ internal sealed class Launcher : Form
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill, Padding = new Padding(28, 22, 28, 20),
-            ColumnCount = 1, RowCount = 5
+            ColumnCount = 1, RowCount = 6
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 130));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 114));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(layout);
         layout.Controls.Add(Hero(), 0, 0);
         layout.Controls.Add(FolderCard(), 0, 1);
         layout.Controls.Add(ProfileCard(), 0, 2);
         layout.Controls.Add(OptionsCard(), 0, 3);
-        layout.Controls.Add(Footer(), 0, 4);
+        layout.Controls.Add(RunnerCard(), 0, 4);
+        layout.Controls.Add(Footer(), 0, 5);
 
         var saved = ReadSettings();
-        frameLimit = Array.IndexOf(FrameLimits, saved.FrameLimit) >= 0 ? saved.FrameLimit : null;
-        audioTrace = saved.AudioTrace;
-        nvidia = saved.Nvidia && NvidiaInstalled;
-        dlssMode = Math.Max(0, Array.IndexOf(DlssModes, saved.Dlss ?? "quality"));
-        frameGeneration = Math.Max(0, Array.IndexOf(FrameMultipliers, saved.FrameGeneration));
+        frameLimit.SelectedIndex = Math.Max(0, Array.IndexOf(FrameLimits, saved.FrameLimit));
+        audioTrace.Checked = saved.AudioTrace;
+        nvidia.Checked = saved.Nvidia && NvidiaInstalled;
+        dlss.SelectedIndex = Math.Max(0, Array.IndexOf(DlssModes, saved.Dlss ?? "quality"));
+        frameGeneration.SelectedIndex = Math.Max(0, Array.IndexOf(FrameMultipliers, saved.FrameGeneration));
         folder.Text = saved.Folder ?? FindLocalGame() ?? "";
         profile.SelectedIndex = saved.SeriesX ? 1 : 0;
         rays.Checked = saved.RayTracing;
@@ -102,6 +104,8 @@ internal sealed class Launcher : Form
         profile.SelectedIndexChanged += (_, _) => RefreshStatus();
         rays.CheckedChanged += (_, _) => RefreshStatus();
         original.CheckedChanged += (_, _) => RefreshStatus();
+        nvidia.CheckedChanged += (_, _) => RefreshStatus();
+        dlss.SelectedIndexChanged += (_, _) => RefreshStatus();
         RefreshStatus();
     }
 
@@ -188,7 +192,7 @@ internal sealed class Launcher : Form
         var options = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
         foreach (var (check, label) in new[] {
             (original, "Original graphics"), (shadowBoost, "Shadow boost"), (memory, "Low-memory mode"),
-            (diagnostics, "FPS HUD and logs") })
+            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing") })
         {
             check.Text = label;
             check.AutoSize = true;
@@ -201,11 +205,40 @@ internal sealed class Launcher : Form
         return card;
     }
 
+    private Control RunnerCard()
+    {
+        var card = Card();
+        card.ColumnCount = 3;
+        card.ColumnStyles.Clear();
+        for (int column = 0; column < 3; column++)
+            card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+
+        nvidia.Text = NvidiaInstalled ? "Use NVIDIA runner (F1 graphics menu)" : "NVIDIA runner is not installed";
+        nvidia.Enabled = NvidiaInstalled;
+        nvidia.AutoSize = true;
+        card.Controls.Add(nvidia, 0, 0);
+        card.SetColumnSpan(nvidia, 3);
+
+        void AddChoice(ComboBox field, int column, string label, string[] values)
+        {
+            card.Controls.Add(LabelFor(label, 10, Ink), column, 1);
+            field.AccessibleName = label;
+            field.DropDownStyle = ComboBoxStyle.DropDownList;
+            field.Dock = DockStyle.Fill;
+            field.Items.AddRange(values);
+            card.Controls.Add(field, column, 2);
+        }
+
+        AddChoice(frameLimit, 0, "Frame limit", ["Game default", "15 FPS", "30 FPS", "60 FPS", "Unlimited"]);
+        AddChoice(dlss, 1, "DLSS", ["Off", "DLAA", "Quality", "Balanced", "Performance"]);
+        AddChoice(frameGeneration, 2, "Frame Generation", ["Off", "2×", "3×", "4×", "5×", "6×"]);
+        return card;
+    }
+
     private Control Footer()
     {
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1 };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 136));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 108));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 142));
         status.Dock = DockStyle.Fill;
@@ -227,75 +260,10 @@ internal sealed class Launcher : Form
                 status.Text = "Could not open logs. " + e.Message;
             }
         };
-        var trainer = MakeButton("Omega Trainer", false);
-        trainer.Click += (_, _) => ShowTrainer();
-        footer.Controls.Add(trainer, 1, 0);
-        footer.Controls.Add(logs, 2, 0);
-        footer.Controls.Add(play, 3, 0);
+        footer.Controls.Add(logs, 1, 0);
+        footer.Controls.Add(play, 2, 0);
         AcceptButton = play;
         return footer;
-    }
-
-    private void ShowTrainer()
-    {
-        using var dialog = new Form
-        {
-            Text = "Omega Trainer", Icon = Icon, Font = Font,
-            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
-            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
-            ClientSize = new Size(445, 408), BackColor = BackColor, ForeColor = Ink
-        };
-        var items = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1 };
-        items.Controls.Add(LabelFor("Omega Trainer", 21, Ink, bold: true));
-        items.Controls.Add(LabelFor("Applies on the next launch.", 10, Muted));
-        items.Controls.Add(LabelFor("Runtime frame limit", 11, Ink, bold: true));
-        var cap = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top };
-        cap.Items.AddRange(["Game default", "15 FPS", "30 FPS", "60 FPS", "Unlimited"]);
-        cap.SelectedIndex = Array.IndexOf(FrameLimits, frameLimit);
-        cap.AccessibleName = "Runtime frame limit";
-        items.Controls.Add(cap);
-        var trace = new CheckBox { Text = "Trace audio for this profile", AutoSize = true, Checked = audioTrace };
-        items.Controls.Add(trace);
-        var runner = new CheckBox
-        {
-            Text = NvidiaInstalled ? "NVIDIA runner for DLSS and the F1 menu" : "Omega NVIDIA runner is not installed",
-            AutoSize = true, Enabled = NvidiaInstalled, Checked = nvidia
-        };
-        items.Controls.Add(runner);
-        items.Controls.Add(LabelFor("DLSS", 11, Ink, bold: true));
-        var dlss = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "DLSS" };
-        dlss.Items.AddRange(["Off", "DLAA", "Quality", "Balanced", "Performance"]);
-        dlss.SelectedIndex = dlssMode;
-        items.Controls.Add(dlss);
-        items.Controls.Add(LabelFor("DLSS Frame Generation", 11, Ink, bold: true));
-        var generation = new ComboBox
-        {
-            DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "DLSS Frame Generation"
-        };
-        generation.Items.AddRange(["Off", "2×", "3×", "4×", "5×", "6×"]);
-        generation.SelectedIndex = frameGeneration;
-        items.Controls.Add(generation);
-        void UpdateGraphicsOptions()
-        {
-            dlss.Enabled = runner.Checked && !original.Checked;
-            generation.Enabled = dlss.Enabled && dlss.SelectedIndex != 0;
-        }
-        runner.CheckedChanged += (_, _) => UpdateGraphicsOptions();
-        dlss.SelectedIndexChanged += (_, _) => UpdateGraphicsOptions();
-        UpdateGraphicsOptions();
-        var apply = MakeButton("Apply", true);
-        apply.DialogResult = DialogResult.OK;
-        items.Controls.Add(apply);
-        dialog.Controls.Add(items);
-        dialog.AcceptButton = apply;
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-            return;
-        frameLimit = FrameLimits[cap.SelectedIndex];
-        audioTrace = trace.Checked;
-        nvidia = runner.Checked;
-        dlssMode = dlss.SelectedIndex;
-        frameGeneration = generation.SelectedIndex;
-        RefreshStatus();
     }
 
     private static TableLayoutPanel Card()
@@ -371,12 +339,14 @@ internal sealed class Launcher : Form
     }
 
     private string? BuildProfile() => repo is null ? null :
-        nvidia ? (NvidiaInstalled ? "release" : null) :
+        nvidia.Checked ? (NvidiaInstalled ? "release" : null) :
         (diagnostics.Checked ? new[] { "diag" } : new[] { "release", "diag" }).FirstOrDefault(p => File.Exists(Path.Combine(repo, "target", p, "victory.exe")));
 
     private void RefreshStatus()
     {
-        shadowBoost.Enabled = !nvidia && !rays.Checked && !original.Checked;
+        shadowBoost.Enabled = !nvidia.Checked && !rays.Checked && !original.Checked;
+        dlss.Enabled = nvidia.Checked && !original.Checked;
+        frameGeneration.Enabled = dlss.Enabled && dlss.SelectedIndex > 0;
         bool ready = repo is not null && BuildProfile() is not null && GamePath() is not null;
         play.Enabled = ready && !launchPending;
         if (launchPending)
@@ -384,7 +354,7 @@ internal sealed class Launcher : Form
         status.Text = repo is null ? "Place Omega Launcher inside the Victory Omega checkout."
             : BuildProfile() is null ? diagnostics.Checked ? "Build the diagnostics executable to use the FPS HUD." : "Build Victory Omega before launching."
             : GamePath() is null ? "Select the folder with the game executable."
-            : nvidia ? "NVIDIA runner ready. Press F1 in game."
+            : nvidia.Checked ? "NVIDIA runner ready. Press F1 in game."
             : rays.Checked ? "Ready. Ray tracing is experimental."
             : "Ready to launch.";
     }
@@ -410,8 +380,9 @@ internal sealed class Launcher : Form
         {
             Directory.CreateDirectory(StateDir);
             var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
-                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked, frameLimit, audioTrace, nvidia,
-                DlssModes[dlssMode], FrameMultipliers[frameGeneration]);
+                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked,
+                FrameLimits[frameLimit.SelectedIndex], audioTrace.Checked, nvidia.Checked,
+                DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex]);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {

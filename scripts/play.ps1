@@ -109,6 +109,7 @@ if ($Nvidia) {
         VICTORY_AMBIENT_SPECULAR = $(if ($estimate) { '1' } else { '' })
         VICTORY_WINDOW_KB = $(if ($LowMemory) { '2048' } else { '' })
         VICTORY_PANEL = $(if ($PerformanceLog) { '1' } else { '0' })
+        VICTORY_OMEGA_AUDIO_TRACE = $(if ($AudioTrace) { '1' } else { '' })
         VICTORY_WARMUP_RESTART = '0'
         VICTORY_TEXTURE_CATCHUP = '1'
     }

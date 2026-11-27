@@ -95,6 +95,30 @@ float3 bound_probe_color(float3 sample, float3 local_light, float gain) {
     $text = $text -replace '(?s)    // Magenta/violet garbage the probes.*?(?=    // What the program left counts)', ''
     $text.Replace('    float3 now = max(was, found);', '    float3 now = max(bound_probe_color(was, found, most), found);')
 }
+$omegaAudio = (Get-Content -LiteralPath (Join-Path $repo 'crates/victory-hle/src/modules/audio.rs') -Raw) -replace '\r\n', "`n"
+Update-NvidiaSource 'crates/victory-hle/src/modules/audio.rs' {
+    param($text)
+    # The two runners share this XMA context layout and streaming protocol.
+    $context = '(?s)impl Context \{.*?(?=\nimpl Xma)'
+    $shared = [regex]::Match($omegaAudio, $context)
+    if (!$shared.Success -or ![regex]::IsMatch($text, $context)) { throw 'Could not find the shared XMA context.' }
+    $text = [regex]::Replace($text, $context, [Text.RegularExpressions.MatchEvaluator]{ param($match) $shared.Value })
+    $text = $text.Replace('use std::ffi::c_void;', "use std::ffi::c_void;`nuse std::sync::atomic::{AtomicU32, Ordering};")
+    $text = $text.Replace("            context.set_field(2, 26, 5, INPUT_INVALID);`n            context.set_field(2, 31, 1, 1);", '            context.set_field(2, 26, 6, INPUT_INVALID | 32);')
+    $text = $text.Replace('    if next == 0 {', '    if next == 0 && !looping {')
+    $text = $text.Replace('        context.set(3, first);', '        context.set(3, 0);')
+    $text.Replace('assert_eq!(step(first), 2 * subframe, "the loop', 'assert_eq!(step(0), 2 * subframe, "the loop')
+}
+Update-NvidiaSource 'crates/victory-core/src/logging.rs' {
+    param($text)
+    $text.Replace('.with(CAP)', @'
+.with(if std::env::var_os("VICTORY_OMEGA_AUDIO_TRACE").is_some_and(|value| value == "1") {
+            LevelFilter::DEBUG
+        } else {
+            CAP
+        })
+'@)
+}
 $launcherOptions = {
     param($text)
     $text.Replace(

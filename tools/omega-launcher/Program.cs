@@ -24,6 +24,8 @@ internal sealed class Launcher : Form
     private static readonly string StateDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Omega Launcher");
     private static readonly string StateFile = Path.Combine(StateDir, "settings.json");
+    private static readonly string NvidiaRunner = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "nvidia-runner", "victory.exe");
     private readonly string? repo;
     private readonly TextBox folder = new();
     private readonly ComboBox profile = new();
@@ -38,6 +40,7 @@ internal sealed class Launcher : Form
     private bool launchPending;
     private string? frameLimit;
     private bool audioTrace;
+    private bool nvidia;
     private static readonly string?[] FrameLimits = [null, "15", "30", "60", "unlimited"];
 
     public Launcher()
@@ -76,6 +79,7 @@ internal sealed class Launcher : Form
         var saved = ReadSettings();
         frameLimit = Array.IndexOf(FrameLimits, saved.FrameLimit) >= 0 ? saved.FrameLimit : null;
         audioTrace = saved.AudioTrace;
+        nvidia = saved.Nvidia && File.Exists(NvidiaRunner);
         folder.Text = saved.Folder ?? FindLocalGame() ?? "";
         profile.SelectedIndex = saved.SeriesX ? 1 : 0;
         rays.Checked = saved.RayTracing;
@@ -231,7 +235,7 @@ internal sealed class Launcher : Form
             Text = "Omega Trainer", Icon = Icon, Font = Font,
             StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
-            ClientSize = new Size(420, 264), BackColor = BackColor, ForeColor = Ink
+            ClientSize = new Size(445, 306), BackColor = BackColor, ForeColor = Ink
         };
         var items = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1 };
         items.Controls.Add(LabelFor("Omega Trainer", 21, Ink, bold: true));
@@ -244,6 +248,12 @@ internal sealed class Launcher : Form
         items.Controls.Add(cap);
         var trace = new CheckBox { Text = "Trace audio for this profile", AutoSize = true, Checked = audioTrace };
         items.Controls.Add(trace);
+        var runner = new CheckBox
+        {
+            Text = File.Exists(NvidiaRunner) ? "NVIDIA runner for DLSS and the F1 menu" : "NVIDIA runner is not installed",
+            AutoSize = true, Enabled = File.Exists(NvidiaRunner), Checked = nvidia
+        };
+        items.Controls.Add(runner);
         var apply = MakeButton("Apply", true);
         apply.DialogResult = DialogResult.OK;
         items.Controls.Add(apply);
@@ -253,6 +263,8 @@ internal sealed class Launcher : Form
             return;
         frameLimit = FrameLimits[cap.SelectedIndex];
         audioTrace = trace.Checked;
+        nvidia = runner.Checked;
+        RefreshStatus();
     }
 
     private static TableLayoutPanel Card()
@@ -328,11 +340,13 @@ internal sealed class Launcher : Form
     }
 
     private string? BuildProfile() => repo is null ? null :
+        nvidia ? (File.Exists(NvidiaRunner) ? "release" : null) :
         (diagnostics.Checked ? new[] { "diag" } : new[] { "release", "diag" }).FirstOrDefault(p => File.Exists(Path.Combine(repo, "target", p, "victory.exe")));
 
     private void RefreshStatus()
     {
-        shadowBoost.Enabled = !rays.Checked && !original.Checked;
+        rays.Enabled = original.Enabled = memory.Enabled = !nvidia;
+        shadowBoost.Enabled = !nvidia && !rays.Checked && !original.Checked;
         bool ready = repo is not null && BuildProfile() is not null && GamePath() is not null;
         play.Enabled = ready && !launchPending;
         if (launchPending)
@@ -340,6 +354,7 @@ internal sealed class Launcher : Form
         status.Text = repo is null ? "Place Omega Launcher inside the Victory Omega checkout."
             : BuildProfile() is null ? diagnostics.Checked ? "Build the diagnostics executable to use the FPS HUD." : "Build Victory Omega before launching."
             : GamePath() is null ? "Select the folder with the game executable."
+            : nvidia ? "NVIDIA runner ready. Press F1 in game."
             : rays.Checked ? "Ready. Ray tracing is experimental."
             : "Ready to launch.";
     }
@@ -365,7 +380,7 @@ internal sealed class Launcher : Form
         {
             Directory.CreateDirectory(StateDir);
             var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
-                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked, frameLimit, audioTrace);
+                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked, frameLimit, audioTrace, nvidia);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {
@@ -377,11 +392,12 @@ internal sealed class Launcher : Form
                 "-Console", selection.SeriesX ? "series-x" : "series-s", "-Build", build];
             foreach (string argument in arguments)
                 start.ArgumentList.Add(argument);
-            if (selection.RayTracing)
+            if (selection.Nvidia) start.ArgumentList.Add("-Nvidia");
+            if (!selection.Nvidia && selection.RayTracing)
                 start.ArgumentList.Add("-RayTracing");
-            if (selection.OriginalGraphics) start.ArgumentList.Add("-OriginalGraphics");
+            if (!selection.Nvidia && selection.OriginalGraphics) start.ArgumentList.Add("-OriginalGraphics");
             if (selection.ShadowBoost && shadowBoost.Enabled) start.ArgumentList.Add("-ShadowBoost");
-            if (selection.LowMemory) start.ArgumentList.Add("-LowMemory");
+            if (!selection.Nvidia && selection.LowMemory) start.ArgumentList.Add("-LowMemory");
             if (selection.Diagnostics) start.ArgumentList.Add("-PerformanceLog");
             if (selection.AudioTrace) start.ArgumentList.Add("-AudioTrace");
             if (selection.FrameLimit is not null)
@@ -482,5 +498,5 @@ internal sealed class Launcher : Form
 
     private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false,
         bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false,
-        string? FrameLimit = null, bool AudioTrace = false);
+        string? FrameLimit = null, bool AudioTrace = false, bool Nvidia = false);
 }

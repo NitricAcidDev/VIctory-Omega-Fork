@@ -6,6 +6,7 @@
 # -ShadowBoost  lift the darkest areas with ray tracing off
 # -LowMemory    use smaller memory windows for buffer copies
 # -Build        target\diag (the default, the build all measurements are of) or target\release
+# -Nvidia       use the installed VIctory-NVIDIA runner for DLSS and its F1 menu
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
@@ -17,6 +18,7 @@ param(
     [switch]$OriginalGraphics,
     [switch]$PerformanceLog,
     [switch]$AudioTrace,
+    [switch]$Nvidia,
     [ValidateSet('15', '30', '60', 'unlimited')][string]$FrameLimit,
     [string]$LegacyRoot,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
@@ -53,7 +55,8 @@ if ($AudioTrace) {
 if ($FrameLimit) { $settings.VICTORY_FPS_LIMIT = $FrameLimit }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
-$victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
+$victory = if ($Nvidia) { Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner/victory.exe' }
+    else { Join-Path $PSScriptRoot "..\target\$Build\victory.exe" }
 if (-not (Test-Path -LiteralPath $victory -PathType Leaf)) { throw "No $victory. Build it first (README.md)." }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "No $Exe." }
 if ($LegacyRoot) {
@@ -65,9 +68,24 @@ if ($LegacyRoot) {
 }
 # (Other settings left over in this window go; where your files are stays.)
 $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
+if ($Nvidia) { $paths += 'VICTORY_STREAMLINE_DIR' }
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+$Exe = (Resolve-Path -LiteralPath $Exe).Path
+if ($Nvidia) {
+    # The two renderers use separate compiled caches and the same title saves.
+    $env:VICTORY_CACHE_DIR = Join-Path $env:LOCALAPPDATA 'victory/cache-nvidia'
+    $sdk = Join-Path $env:LOCALAPPDATA 'victory/nvidia-sdk/Streamline/bin/x64'
+    if (!$env:VICTORY_STREAMLINE_DIR -and (Test-Path -LiteralPath (Join-Path $sdk 'sl.interposer.dll') -PathType Leaf)) {
+        $env:VICTORY_STREAMLINE_DIR = $sdk
+    }
+    if ($settings.VICTORY_LOG) { $env:VICTORY_LOG = $settings.VICTORY_LOG }
+    $launch = @('play', $Exe, '--dlss', 'quality', '--fg-type', 'dlss')
+    if ($Console -eq 'series-s') { $launch += '--series-s' }
+    if ($FrameLimit) { $launch += '--fps', $(if ($FrameLimit -eq 'unlimited') { '1000' } else { $FrameLimit }) }
+    & $victory @launch
+    exit $LASTEXITCODE
+}
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
-$Exe = (Resolve-Path $Exe).Path
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
 try { & $victory run $Exe --console $Console --execute } finally { Pop-Location }
 exit $LASTEXITCODE

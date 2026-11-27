@@ -20,7 +20,9 @@ Omega Launcher uses `%LOCALAPPDATA%\victory\data` for saves and `%LOCALAPPDATA%\
 
 ### NVIDIA fork features and Omega support
 
-The [VIctory-NVIDIA fork](https://github.com/trustno1-coder/VIctory-NVIDIA) offers DLSS Super Resolution, DLSS Frame Generation, and an F1 graphics menu. Omega has adopted selected renderer changes from that fork. DLSS and frame generation are available in VIctory-NVIDIA. This Omega build uses the existing game upscaling path. See the [RTX 5060 Ti performance report](docs/performance-nvidia.md) for measured gameplay FPS and frame times.
+In Omega Launcher, **Omega Trainer** sets the runtime frame limit and can enable audio tracing for the next launch. The NVIDIA runner option enables DLSS Super Resolution and opens its graphics menu with **F1** in game. Use that menu for the DLSS mode and Frame Generation.
+
+Install the [VIctory-NVIDIA runner](https://github.com/trustno1-coder/VIctory-NVIDIA/releases) as `%LOCALAPPDATA%\victory\nvidia-runner\victory.exe` and run that executable with `get-dlss` to install NVIDIA Streamline. Select the NVIDIA runner in Omega Trainer or use `scripts\play.ps1 -Nvidia`. The two runners use the same saves and separate compiled caches. The NVIDIA runner applies its own graphics settings and uses 1440p output for its default Series X profile. The default Omega runner uses the game's existing upscaler. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.

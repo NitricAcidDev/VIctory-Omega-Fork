@@ -24,8 +24,10 @@ internal sealed class Launcher : Form
     private static readonly string StateDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Omega Launcher");
     private static readonly string StateFile = Path.Combine(StateDir, "settings.json");
-    private static readonly string NvidiaRunner = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "nvidia-runner", "victory.exe");
+    private static readonly string NvidiaRunnerDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "nvidia-runner");
+    private static bool NvidiaInstalled => File.Exists(Path.Combine(NvidiaRunnerDir, "victory.exe"))
+        && File.Exists(Path.Combine(NvidiaRunnerDir, "omega-branding-v1"));
     private readonly string? repo;
     private readonly TextBox folder = new();
     private readonly ComboBox profile = new();
@@ -79,7 +81,7 @@ internal sealed class Launcher : Form
         var saved = ReadSettings();
         frameLimit = Array.IndexOf(FrameLimits, saved.FrameLimit) >= 0 ? saved.FrameLimit : null;
         audioTrace = saved.AudioTrace;
-        nvidia = saved.Nvidia && File.Exists(NvidiaRunner);
+        nvidia = saved.Nvidia && NvidiaInstalled;
         folder.Text = saved.Folder ?? FindLocalGame() ?? "";
         profile.SelectedIndex = saved.SeriesX ? 1 : 0;
         rays.Checked = saved.RayTracing;
@@ -250,8 +252,8 @@ internal sealed class Launcher : Form
         items.Controls.Add(trace);
         var runner = new CheckBox
         {
-            Text = File.Exists(NvidiaRunner) ? "NVIDIA runner for DLSS and the F1 menu" : "NVIDIA runner is not installed",
-            AutoSize = true, Enabled = File.Exists(NvidiaRunner), Checked = nvidia
+            Text = NvidiaInstalled ? "NVIDIA runner for DLSS and the F1 menu" : "Omega NVIDIA runner is not installed",
+            AutoSize = true, Enabled = NvidiaInstalled, Checked = nvidia
         };
         items.Controls.Add(runner);
         var apply = MakeButton("Apply", true);
@@ -340,7 +342,7 @@ internal sealed class Launcher : Form
     }
 
     private string? BuildProfile() => repo is null ? null :
-        nvidia ? (File.Exists(NvidiaRunner) ? "release" : null) :
+        nvidia ? (NvidiaInstalled ? "release" : null) :
         (diagnostics.Checked ? new[] { "diag" } : new[] { "release", "diag" }).FirstOrDefault(p => File.Exists(Path.Combine(repo, "target", p, "victory.exe")));
 
     private void RefreshStatus()

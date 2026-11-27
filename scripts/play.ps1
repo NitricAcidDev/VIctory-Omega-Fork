@@ -55,7 +55,13 @@ if ($AudioTrace) {
 if ($FrameLimit) { $settings.VICTORY_FPS_LIMIT = $FrameLimit }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
-$victory = if ($Nvidia) { Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner/victory.exe' }
+$victory = if ($Nvidia) {
+    $directory = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner'
+    if (!(Test-Path -LiteralPath (Join-Path $directory 'omega-branding-v1') -PathType Leaf)) {
+        throw 'Build the Omega NVIDIA runner with scripts/Build-OmegaNvidia.ps1 first.'
+    }
+    Join-Path $directory 'victory.exe'
+}
     else { Join-Path $PSScriptRoot "..\target\$Build\victory.exe" }
 if (-not (Test-Path -LiteralPath $victory -PathType Leaf)) { throw "No $victory. Build it first (README.md)." }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "No $Exe." }

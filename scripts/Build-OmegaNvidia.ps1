@@ -281,9 +281,13 @@ Update-NvidiaSource 'crates/victory-hle/src/modules/audio.rs' {
     $text = $text.Replace('use std::ffi::c_void;', "use std::ffi::c_void;`nuse std::sync::atomic::{AtomicU32, Ordering};")
     $text = $text.Replace("            context.set_field(2, 26, 5, INPUT_INVALID);`n            context.set_field(2, 31, 1, 1);", '            context.set_field(2, 26, 6, INPUT_INVALID | 32);')
     $text = $text.Replace('    if next == 0 {', '    if next == 0 && !looping {')
+    $endInput = "        context.set_field(0, 20 + current, 1, 0);`n    }`n    context.set_field(2, 0, 26, next as u32);"
+    if (!$text.Contains($endInput)) { throw 'Could not find the shared XMA input handoff.' }
+    $text = $text.Replace($endInput, "        context.finish_input(current);`n    } else {`n        context.set_field(2, 0, 26, next as u32);`n    }")
+    $text = $text.Replace("        context.set_field(0, 20 + current, 1, 0);`n        return true;", "        context.finish_input(current);`n        return true;")
     $text = $text.Replace('        context.set(3, first);', '        context.set(3, 0);')
     $text.Replace('assert_eq!(step(first), 2 * subframe, "the loop', 'assert_eq!(step(0), 2 * subframe, "the loop')
-}
+} -PreviousHash 'E884E10E0D509FC43F385EE74DFE7D6A48BE0F7568469C9DFBED50E00BF35EDE'
 Update-NvidiaSource 'crates/victory-core/src/logging.rs' {
     param($text)
     $text.Replace('.with(CAP)', @'

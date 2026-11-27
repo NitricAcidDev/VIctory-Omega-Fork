@@ -411,6 +411,17 @@ impl Context {
     fn channels(self) -> usize {
         1 + self.field(1, 29, 1) as usize
     }
+
+    fn finish_input(self, current: u32) {
+        let other = 1 - current;
+        self.set_field(2, 0, 26, 0);
+        // Select a queued buffer before releasing this slot to the producer.
+        // A quick refill of this slot must not jump ahead of queued audio.
+        if self.field(0, 20 + other, 1) != 0 {
+            self.set_field(4, 31, 1, other);
+        }
+        self.set_field(0, 20 + current, 1, 0);
+    }
 }
 
 impl Xma {
@@ -605,7 +616,7 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
         _ => (context.get(6), context.field(1, 0, 12)),
     };
     let Some(data) = heap_bytes(address & !0x7ff, packets as usize * xma::PACKET_BYTES) else {
-        context.set_field(0, 20 + current, 1, 0);
+        context.finish_input(current);
         return true;
     };
     let mut at = context.field(2, 0, 26) as usize;
@@ -614,7 +625,7 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
     }
     let Some(frame) = xma::read_frame(data, at) else {
         // This input is used up.
-        context.set_field(0, 20 + current, 1, 0);
+        context.finish_input(current);
         return true;
     };
     let decoder = voice.decoder.get_or_insert_with(|| {
@@ -663,9 +674,10 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
     // A loop can return to bit zero, which means the first frame in this
     // packet buffer. Only exhaustion of the input clears its valid bit.
     if next == 0 && !looping {
-        context.set_field(0, 20 + current, 1, 0);
+        context.finish_input(current);
+    } else {
+        context.set_field(2, 0, 26, next as u32);
     }
-    context.set_field(2, 0, 26, next as u32);
     true
 }
 
@@ -963,6 +975,27 @@ pub(crate) fn module() -> HleModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xma_keeps_queued_input_ahead_of_a_refilled_slot() {
+        let mut words = [0u32; 16];
+        let context = Context(words.as_mut_ptr());
+        context.set_field(0, 20, 2, 3);
+        context.set_field(2, 0, 26, 1234);
+
+        context.finish_input(0);
+        assert_eq!(context.field(0, 20, 2), 2);
+        assert_eq!(context.field(2, 0, 26), 0);
+        context.set_field(0, 20, 1, 1);
+        assert_eq!(context.field(4, 31, 1), 1);
+
+        context.finish_input(1);
+        assert_eq!(context.field(0, 20, 2), 1);
+        assert_eq!(context.field(4, 31, 1), 0);
+        context.finish_input(0);
+        assert_eq!(context.field(0, 20, 2), 0);
+        assert_eq!(context.field(4, 31, 1), 0);
+    }
 
     #[test]
     fn heap_maps_every_byte_of_a_block() {

@@ -408,6 +408,12 @@ void raise(uint3 at : SV_DispatchThreadID) {
         float3 cap = max(found * most, 1e-6);
         float3 over = was / cap;
         was *= min(1.0, 1.0 / max(max(over.r, over.g), max(over.b, 1e-6)));
+        // Keep a coherent increase in brightness, but limit color that
+        // appears in only one or two channels of the reused probe data.
+        float3 excess = max(was - found, 0.0);
+        float common = min(excess.r, min(excess.g, excess.b));
+        float3 supported = found + common + 0.25 * (cap - found);
+        was = min(was, supported);
     } else {
         float top = max(dot(found, LUMA) * -most, 1e-6);
         float has = dot(was, LUMA);

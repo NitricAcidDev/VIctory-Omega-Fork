@@ -196,13 +196,12 @@ Texture2D<float> depth : register(t0);
 RWStructuredBuffer<float4> cells : register(u1);
 // Three a point: red, green and blue, each a mean and a direction.
 RWStructuredBuffer<float4> points : register(u2);
-static const float FAR_DEPTH = 1000.0;
 static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
 // The point seen at a texel, in metres from the eye (x right, y up, z away).
 float3 seen(int2 p, float2 size) {
     float d = depth.Load(int3(clamp(p, int2(0, 0), int2(size) - 1), 0));
-    float z = min(near / max(d, 1e-7), FAR_DEPTH);
+    float z = min(near / max(d, 1e-7), 1000.0);
     float2 ndc = (float2(p) + 0.5) / size * 2.0 - 1.0;
     return float3(ndc.x * tan_y * size.x / size.y * z, -ndc.y * tan_y * z, z);
 }
@@ -241,10 +240,7 @@ void mean() {
 void place(uint3 at : SV_DispatchThreadID) {
     float2 size = float2(width, height);
     float3 p = seen(int2((float2(at.xy) + 0.5) * size / float2(CX, CY)), size);
-    // The far sentinel has no surface depth. Giving it a full weight lets
-    // the sky dominate nearby curtains, foliage and character edges.
-    float weight = p.z < FAR_DEPTH ? p.z * p.z : 0.0;
-    cells[CELLS + 1 + at.y * CX + at.x] = float4(p, weight);
+    cells[CELLS + 1 + at.y * CX + at.x] = float4(p, p.z * p.z);
 }
 #endif
 
@@ -346,7 +342,6 @@ void raise(uint3 at : SV_DispatchThreadID) {
     if (at.x >= width || at.y >= height) return;
     int2 p = int2(at.xy);
     float3 c = seen(p, size);
-    if (c.z >= FAR_DEPTH) return;
     float3 l = seen(p + int2(-1, 0), size), r = seen(p + int2(1, 0), size);
     float3 u = seen(p + int2(0, -1), size), d = seen(p + int2(0, 1), size);
     float3 dx = abs(l.z - c.z) < abs(r.z - c.z) ? c - l : r - c;
@@ -387,14 +382,13 @@ void raise(uint3 at : SV_DispatchThreadID) {
         int2 q = clamp(g0 + int2(k & 1, k >> 1), int2(0, 0), int2(PX, PY) - 1);
         float z = seen(int2((float2(q) + 0.5) * size / float2(PX, PY)), size).z;
         float2 b = float2(k & 1 ? f.x : 1 - f.x, k >> 1 ? f.y : 1 - f.y);
-        float w = z < FAR_DEPTH ? (b.x * b.y + 1e-3) / (0.02 + abs(z - c.z) / c.z) : 0.0;
+        float w = (b.x * b.y + 1e-3) / (0.02 + abs(z - c.z) / c.z);
         uint at0 = (q.y * PX + q.x) * 3;
         sr += w * points[at0];
         sg += w * points[at0 + 1];
         sb += w * points[at0 + 2];
         sum += w;
     }
-    sum = max(sum, 1e-6);
     float3 all = float3(sr.w, sg.w, sb.w) / sum;
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);

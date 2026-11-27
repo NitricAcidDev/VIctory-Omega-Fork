@@ -20,7 +20,7 @@ if (!(Test-Path -LiteralPath (Join-Path $SourceDir 'Cargo.toml'))) {
     if ($LASTEXITCODE) { throw 'Could not check out the NVIDIA source.' }
 }
 
-function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$Previous, [string]$PreviousHash) {
+function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$Previous, [string[]]$PreviousHash) {
     $file = Join-Path $SourceDir $Path
     $original = ((git -C $SourceDir show "${commit}:$Path") -join [char]10).TrimEnd("`n")
     if ($LASTEXITCODE) { throw "Could not read $Path at $commit." }
@@ -28,7 +28,7 @@ function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$
     if ($updated -eq $original) { throw "The Omega branding change did not match $Path." }
     $current = ([IO.File]::ReadAllText($file) -replace '\r\n', "`n").TrimEnd("`n")
     if ($current -ne $original -and $current -ne $updated -and (!$Previous -or $current -ne (& $Previous $original))) {
-        if (!$PreviousHash -or (Get-NvidiaSourceHash $current) -ne $PreviousHash) {
+        if ((Get-NvidiaSourceHash $current) -notin $PreviousHash) {
             throw "Preserving local modifications in $file."
         }
     }
@@ -41,27 +41,41 @@ function Get-NvidiaSourceHash([string]$Text) {
     finally { $sha.Dispose() }
 }
 
-$branding = Get-Content -LiteralPath (Join-Path $repo 'crates/victory-gpu/src/window.rs') -Raw
-$start = $branding.IndexOf("/// The game's desktop window name.")
-$end = $branding.IndexOf('struct Windowed')
-if ($start -lt 0 -or $end -le $start) { throw 'Could not find the Omega window branding code.' }
-$header = 'use std::sync::OnceLock;', 'use windows_sys::Win32::Foundation::HWND;',
-    'use windows_sys::Win32::UI::WindowsAndMessaging as wm;', ''
-$module = ($header -join "`n") + "`n" + $branding.Substring($start, $end - $start).TrimEnd()
 $gpu = Join-Path $SourceDir 'crates/victory-gpu'
 $null = [IO.Directory]::CreateDirectory((Join-Path $gpu 'assets'))
 Copy-Item -LiteralPath (Join-Path $repo 'crates/victory-gpu/assets/omega.png') -Destination (Join-Path $gpu 'assets/omega.png')
-[IO.File]::WriteAllText((Join-Path $gpu 'src/omega_window.rs'), $module + "`n", [Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath (Join-Path $repo 'crates/victory-gpu/src/window.rs') -Destination (Join-Path $gpu 'src/omega_window.rs')
+
+Update-NvidiaSource 'crates/victory-gpu/Cargo.toml' {
+    param($text)
+    $text.Replace('features = ["Win32_Foundation", "Win32_Security"', 'features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security"')
+}
 
 Update-NvidiaSource 'crates/victory-gpu/src/lib.rs' {
     param($text)
     $text.Replace('mod host;', "mod host;`n#[cfg(windows)]`npub mod omega_window;")
 }
-Update-NvidiaSource 'crates/victory-hle/src/modules/lifecycle.rs' {
+$brandTitleWindow = {
     param($text)
     $text.Replace("    hook(hwnd);`n    hwnd", "    if !hwnd.is_null() {`n        victory_gpu::omega_window::brand(hwnd);`n    }`n    hook(hwnd);`n    hwnd")
 }
-Update-NvidiaSource 'crates/victory-gpu/src/host.rs' {
+Update-NvidiaSource 'crates/victory-hle/src/modules/lifecycle.rs' {
+    param($text)
+    $text = & $brandTitleWindow $text
+    $text = $text -replace '(?s)fn fullscreen\(hwnd: HWND\) \{.*?\n\}\n', @'
+fn fullscreen(hwnd: HWND) {
+    victory_gpu::omega_window::set_fullscreen(hwnd, enabled("VICTORY_FULLSCREEN"));
+}
+
+'@
+    $text.Replace('    if message == wm::WM_SETFOCUS {', @'
+    if victory_gpu::omega_window::handle_fullscreen_message(hwnd, message, wparam) {
+        return 0;
+    }
+    if message == wm::WM_SETFOCUS {
+'@)
+} -Previous $brandTitleWindow
+$brandHostWindow = {
     param($text)
     $text = $text -replace '(?m)^    /// The caption the window had, once read\.\n    caption: Option<Vec<u16>>,\n', ''
     $text = $text -replace '(?m)^            caption: None,\n', ''
@@ -72,18 +86,79 @@ Update-NvidiaSource 'crates/victory-gpu/src/host.rs' {
     $text = $text.Replace("        CreateWindowExW(`n            WINDOW_EX_STYLE(0),`n            CLASS,", "        let hwnd = CreateWindowExW(`n            WINDOW_EX_STYLE(0),`n            CLASS,")
     $text.Replace("            Some(instance.into()),`n            None,`n        )", "            Some(instance.into()),`n            None,`n        )?;`n        crate::omega_window::brand(hwnd.0);`n        Ok(hwnd)")
 }
-# Accept the exact generated menu from the retired Omega World preview.
+Update-NvidiaSource 'crates/victory-gpu/src/host.rs' {
+    param($text)
+    $text = & $brandHostWindow $text
+    $text = $text.Replace('            p.menu.frame();', '            p.menu.frame(p.hwnd.0);')
+    $text = $text.Replace('    // SAFETY: the default handling for our window.', @'
+    if crate::omega_window::handle_fullscreen_message(hwnd.0, message, wparam.0) {
+        return LRESULT(0);
+    }
+    // SAFETY: the default handling for our window.
+'@)
+    $text.Replace('        crate::omega_window::brand(hwnd.0);', @'
+        crate::omega_window::brand(hwnd.0);
+        let fullscreen = std::env::var_os("VICTORY_FULLSCREEN").is_some_and(|value| value == "1");
+        crate::omega_window::set_fullscreen(hwnd.0, fullscreen);
+'@)
+} -Previous $brandHostWindow
 $graphicsMenuBranding = {
     param($text)
     $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
 }
-Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+$frameRateMenu = {
     param($text)
     $text = & $graphicsMenuBranding $text
     $cap = '("30", "30 (THE GAME)")], live: false },'
     if (!$text.Contains($cap)) { throw 'Could not find the NVIDIA frame-rate cap choices.' }
     $text.Replace($cap, '("30", "30 (THE GAME)"), ("15", "15 FPS")], live: false },')
-} -Previous $graphicsMenuBranding -PreviousHash 'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
+}
+Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+    param($text)
+    $text = & $frameRateMenu $text
+    $text = $text.Replace('VK_ESCAPE, VK_F1, VK_LEFT', 'VK_ESCAPE, VK_F1, VK_F11, VK_LEFT')
+    $text = $text.Replace('[u16; 7] = [VK_F1, VK_UP', '[u16; 8] = [VK_F1, VK_F11, VK_UP')
+    $text = $text.Replace('var: "VICTORY_FULLSCREEN", label: "FULLSCREEN (NO BORDER)", values: UNSET_ON, live: false',
+        'var: "VICTORY_FULLSCREEN", label: "FULLSCREEN (F11)", values: UNSET_ON, live: true')
+    $text = $text.Replace('pub(super) fn frame(&mut self) {',
+        'pub(super) fn frame(&mut self, hwnd: windows_sys::Win32::Foundation::HWND) {')
+    $text = $text.Replace("        for vk in pressed {`n            let open = Self::open();", @'
+        let fullscreen = ITEMS.iter().position(|item| item.var == "VICTORY_FULLSCREEN").unwrap();
+        let previous_fullscreen = self.values[fullscreen].clone();
+        for vk in pressed {
+            if vk == VK_F11 {
+                let step = if self.values[fullscreen] == "1" { 1 } else { -1 };
+                self.change(fullscreen, step);
+                self.changed = true;
+                continue;
+            }
+            let open = Self::open();
+'@)
+    $text.Replace(@'
+            self.changed = true;
+        }
+    }
+
+    /// Records the copy of the box onto
+'@, @'
+            self.changed = true;
+        }
+        let enabled = self.values[fullscreen] == "1";
+        if enabled != (previous_fullscreen == "1")
+            && !crate::omega_window::request_fullscreen(hwnd, enabled)
+        {
+            self.values[fullscreen] = previous_fullscreen;
+            self.apply_live(fullscreen);
+            self.note = "COULD NOT CHANGE FULLSCREEN".to_owned();
+        }
+    }
+
+    /// Records the copy of the box onto
+'@)
+} -Previous $frameRateMenu -PreviousHash @(
+    '91A2717E47DD1C717E6FF134181A7087BAE6A32F0FCA3035E58DE17D79A544DB',
+    'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
+)
 Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
     param($text)
     $text = $text.Replace(

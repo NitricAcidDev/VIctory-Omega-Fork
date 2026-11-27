@@ -31,7 +31,7 @@ The migrator copies missing files into `%LOCALAPPDATA%\victory\data` and `%LOCAL
 
 ### NVIDIA fork features and Omega support
 
-Omega Launcher provides the frame limit and audio tracing on its main screen. Select the NVIDIA runner to enable the DLSS and Frame Generation controls. **F1** opens its graphics menu in game.
+Omega Launcher provides the frame limit and audio tracing on its main screen. Select the NVIDIA runner to enable the DLSS and Frame Generation controls. **F1** opens its graphics menu in game. Press **F11** to toggle borderless fullscreen immediately, or change **Fullscreen (F11)** in the F1 menu. Use **Save** in the menu to keep the setting for the next launch.
 
 With the NVIDIA runner set to **15 FPS**, light frames such as menus and intro videos target **30 FPS**. The runner uses draw count to distinguish those frames from 3D gameplay, so menus that keep drawing the world may still follow the gameplay cap. Video playback keeps its source cadence.
 

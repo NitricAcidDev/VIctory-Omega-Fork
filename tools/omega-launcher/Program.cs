@@ -25,7 +25,7 @@ internal sealed class Launcher : Form
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Omega Launcher");
     private static readonly string StateFile = Path.Combine(StateDir, "settings.json");
     private static readonly string NvidiaRunnerDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "nvidia-runner");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "victory", "nvidia-runner", "omega-options-v1");
     private static bool NvidiaInstalled => File.Exists(Path.Combine(NvidiaRunnerDir, "victory.exe"))
         && File.Exists(Path.Combine(NvidiaRunnerDir, "omega-branding-v1"));
     private readonly string? repo;
@@ -43,7 +43,11 @@ internal sealed class Launcher : Form
     private string? frameLimit;
     private bool audioTrace;
     private bool nvidia;
+    private int dlssMode = 2;
+    private int frameGeneration;
     private static readonly string?[] FrameLimits = [null, "15", "30", "60", "unlimited"];
+    private static readonly string[] DlssModes = ["off", "dlaa", "quality", "balanced", "performance"];
+    private static readonly int[] FrameMultipliers = [0, 2, 3, 4, 5, 6];
 
     public Launcher()
     {
@@ -82,6 +86,8 @@ internal sealed class Launcher : Form
         frameLimit = Array.IndexOf(FrameLimits, saved.FrameLimit) >= 0 ? saved.FrameLimit : null;
         audioTrace = saved.AudioTrace;
         nvidia = saved.Nvidia && NvidiaInstalled;
+        dlssMode = Math.Max(0, Array.IndexOf(DlssModes, saved.Dlss ?? "quality"));
+        frameGeneration = Math.Max(0, Array.IndexOf(FrameMultipliers, saved.FrameGeneration));
         folder.Text = saved.Folder ?? FindLocalGame() ?? "";
         profile.SelectedIndex = saved.SeriesX ? 1 : 0;
         rays.Checked = saved.RayTracing;
@@ -237,7 +243,7 @@ internal sealed class Launcher : Form
             Text = "Omega Trainer", Icon = Icon, Font = Font,
             StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
-            ClientSize = new Size(445, 306), BackColor = BackColor, ForeColor = Ink
+            ClientSize = new Size(445, 408), BackColor = BackColor, ForeColor = Ink
         };
         var items = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1 };
         items.Controls.Add(LabelFor("Omega Trainer", 21, Ink, bold: true));
@@ -256,6 +262,27 @@ internal sealed class Launcher : Form
             AutoSize = true, Enabled = NvidiaInstalled, Checked = nvidia
         };
         items.Controls.Add(runner);
+        items.Controls.Add(LabelFor("DLSS", 11, Ink, bold: true));
+        var dlss = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "DLSS" };
+        dlss.Items.AddRange(["Off", "DLAA", "Quality", "Balanced", "Performance"]);
+        dlss.SelectedIndex = dlssMode;
+        items.Controls.Add(dlss);
+        items.Controls.Add(LabelFor("DLSS Frame Generation", 11, Ink, bold: true));
+        var generation = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "DLSS Frame Generation"
+        };
+        generation.Items.AddRange(["Off", "2×", "3×", "4×", "5×", "6×"]);
+        generation.SelectedIndex = frameGeneration;
+        items.Controls.Add(generation);
+        void UpdateGraphicsOptions()
+        {
+            dlss.Enabled = runner.Checked && !original.Checked;
+            generation.Enabled = dlss.Enabled && dlss.SelectedIndex != 0;
+        }
+        runner.CheckedChanged += (_, _) => UpdateGraphicsOptions();
+        dlss.SelectedIndexChanged += (_, _) => UpdateGraphicsOptions();
+        UpdateGraphicsOptions();
         var apply = MakeButton("Apply", true);
         apply.DialogResult = DialogResult.OK;
         items.Controls.Add(apply);
@@ -266,6 +293,8 @@ internal sealed class Launcher : Form
         frameLimit = FrameLimits[cap.SelectedIndex];
         audioTrace = trace.Checked;
         nvidia = runner.Checked;
+        dlssMode = dlss.SelectedIndex;
+        frameGeneration = generation.SelectedIndex;
         RefreshStatus();
     }
 
@@ -347,7 +376,6 @@ internal sealed class Launcher : Form
 
     private void RefreshStatus()
     {
-        rays.Enabled = original.Enabled = memory.Enabled = !nvidia;
         shadowBoost.Enabled = !nvidia && !rays.Checked && !original.Checked;
         bool ready = repo is not null && BuildProfile() is not null && GamePath() is not null;
         play.Enabled = ready && !launchPending;
@@ -382,7 +410,8 @@ internal sealed class Launcher : Form
         {
             Directory.CreateDirectory(StateDir);
             var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked,
-                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked, frameLimit, audioTrace, nvidia);
+                original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked, frameLimit, audioTrace, nvidia,
+                DlssModes[dlssMode], FrameMultipliers[frameGeneration]);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {
@@ -394,12 +423,19 @@ internal sealed class Launcher : Form
                 "-Console", selection.SeriesX ? "series-x" : "series-s", "-Build", build];
             foreach (string argument in arguments)
                 start.ArgumentList.Add(argument);
-            if (selection.Nvidia) start.ArgumentList.Add("-Nvidia");
-            if (!selection.Nvidia && selection.RayTracing)
+            if (selection.Nvidia)
+            {
+                start.ArgumentList.Add("-Nvidia");
+                start.ArgumentList.Add("-Dlss");
+                start.ArgumentList.Add(selection.Dlss!);
+                start.ArgumentList.Add("-FrameGeneration");
+                start.ArgumentList.Add(selection.FrameGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            if (selection.RayTracing)
                 start.ArgumentList.Add("-RayTracing");
-            if (!selection.Nvidia && selection.OriginalGraphics) start.ArgumentList.Add("-OriginalGraphics");
+            if (selection.OriginalGraphics) start.ArgumentList.Add("-OriginalGraphics");
             if (selection.ShadowBoost && shadowBoost.Enabled) start.ArgumentList.Add("-ShadowBoost");
-            if (!selection.Nvidia && selection.LowMemory) start.ArgumentList.Add("-LowMemory");
+            if (selection.LowMemory) start.ArgumentList.Add("-LowMemory");
             if (selection.Diagnostics) start.ArgumentList.Add("-PerformanceLog");
             if (selection.AudioTrace) start.ArgumentList.Add("-AudioTrace");
             if (selection.FrameLimit is not null)
@@ -500,5 +536,6 @@ internal sealed class Launcher : Form
 
     private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false,
         bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false,
-        string? FrameLimit = null, bool AudioTrace = false, bool Nvidia = false);
+        string? FrameLimit = null, bool AudioTrace = false, bool Nvidia = false, string? Dlss = null,
+        int FrameGeneration = 0);
 }

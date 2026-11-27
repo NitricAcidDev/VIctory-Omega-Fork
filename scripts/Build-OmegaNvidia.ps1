@@ -20,14 +20,16 @@ if (!(Test-Path -LiteralPath (Join-Path $SourceDir 'Cargo.toml'))) {
     if ($LASTEXITCODE) { throw 'Could not check out the NVIDIA source.' }
 }
 
-function Update-NvidiaSource([string]$Path, [scriptblock]$Change) {
+function Update-NvidiaSource([string]$Path, [scriptblock]$Change, [scriptblock]$Previous) {
     $file = Join-Path $SourceDir $Path
     $original = ((git -C $SourceDir show "${commit}:$Path") -join [char]10).TrimEnd("`n")
     if ($LASTEXITCODE) { throw "Could not read $Path at $commit." }
     $updated = & $Change $original
     if ($updated -eq $original) { throw "The Omega branding change did not match $Path." }
     $current = ([IO.File]::ReadAllText($file) -replace '\r\n', "`n").TrimEnd("`n")
-    if ($current -ne $original -and $current -ne $updated) { throw "Preserving local modifications in $file." }
+    if ($current -ne $original -and $current -ne $updated -and (!$Previous -or $current -ne (& $Previous $original))) {
+        throw "Preserving local modifications in $file."
+    }
     [IO.File]::WriteAllText($file, $updated + [char]10, [Text.UTF8Encoding]::new($false))
 }
 
@@ -66,6 +68,23 @@ Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     param($text)
     $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
 }
+$launcherOptions = {
+    param($text)
+    $text.Replace(
+        '    let menu = parse_menu(&std::fs::read_to_string(&menu_file).unwrap_or_default());',
+        @'
+    let mut menu = parse_menu(&std::fs::read_to_string(&menu_file).unwrap_or_default());
+    // Launcher choices apply once. An F1 restart reads its own saved choices.
+    if let Ok(options) = std::env::var("VICTORY_OMEGA_LAUNCH") {
+        menu.extend(parse_menu(&options));
+    }
+'@)
+}
+Update-NvidiaSource 'apps/victory/src/play.rs' {
+    param($text)
+    $text = & $launcherOptions $text
+    $text.Replace('    if !s.contains_key("VICTORY_WARMUP_RESTART")', '    if s.get("VICTORY_WARMUP_RESTART").is_some_and(|value| value != "0")')
+} $launcherOptions
 
 Push-Location $SourceDir
 try {
@@ -73,7 +92,8 @@ try {
     if ($LASTEXITCODE) { throw 'The Omega NVIDIA runner build failed.' }
 } finally { Pop-Location }
 
-$target = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner'
+# Install beside older builds so an active game can finish its session.
+$target = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner/omega-options-v1'
 $null = [IO.Directory]::CreateDirectory($target)
 $active = Join-Path $target 'victory.exe'
 $stage = Join-Path $target ('.omega-install-' + [Guid]::NewGuid())

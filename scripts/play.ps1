@@ -19,6 +19,8 @@ param(
     [switch]$PerformanceLog,
     [switch]$AudioTrace,
     [switch]$Nvidia,
+    [ValidateSet('off', 'dlaa', 'quality', 'balanced', 'performance')][string]$Dlss = 'quality',
+    [ValidateSet(0, 2, 3, 4, 5, 6)][int]$FrameGeneration = 0,
     [ValidateSet('15', '30', '60', 'unlimited')][string]$FrameLimit,
     [string]$LegacyRoot,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
@@ -56,7 +58,7 @@ if ($FrameLimit) { $settings.VICTORY_FPS_LIMIT = $FrameLimit }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = if ($Nvidia) {
-    $directory = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner'
+    $directory = Join-Path $env:LOCALAPPDATA 'victory/nvidia-runner/omega-options-v1'
     if (!(Test-Path -LiteralPath (Join-Path $directory 'omega-branding-v1') -PathType Leaf)) {
         throw 'Build the Omega NVIDIA runner with scripts/Build-OmegaNvidia.ps1 first.'
     }
@@ -85,10 +87,27 @@ if ($Nvidia) {
         $env:VICTORY_STREAMLINE_DIR = $sdk
     }
     if ($settings.VICTORY_LOG) { $env:VICTORY_LOG = $settings.VICTORY_LOG }
-    $launch = @('play', $Exe, '--dlss', 'quality', '--fg-type', 'dlss')
-    if ($Console -eq 'series-s') { $launch += '--series-s' }
-    if ($FrameLimit) { $launch += '--fps', $(if ($FrameLimit -eq 'unlimited') { '1000' } else { $FrameLimit }) }
-    & $victory @launch
+    $useDlss = !$OriginalGraphics -and $Dlss -ne 'off'
+    $estimate = !$OriginalGraphics -and !$RayTracing
+    $options = @{
+        VICTORY_MENU_CONSOLE = $Console
+        VICTORY_MENU_DLSS = $(if ($useDlss) { $Dlss } else { 'off' })
+        VICTORY_MENU_FRAMEGEN = $(if ($useDlss) { $FrameGeneration } else { 0 })
+        VICTORY_MENU_FG_TYPE = 'dlss'
+        VICTORY_MENU_FPS = $(if ($FrameLimit -eq 'unlimited') { '1000' } elseif ($FrameLimit) { $FrameLimit } else { '30' })
+        VICTORY_BVH_BUILDER = $(if ($RayTracing) { '1' } else { '' })
+        VICTORY_AMBIENT = $(if ($estimate) { '0.8' } else { '' })
+        VICTORY_AMBIENT_AIR = $(if ($estimate) { '1.5' } else { '' })
+        VICTORY_AMBIENT_SPECULAR = $(if ($estimate) { '1' } else { '' })
+        VICTORY_WINDOW_KB = $(if ($LowMemory) { '2048' } else { '' })
+        VICTORY_PANEL = $(if ($PerformanceLog) { '1' } else { '0' })
+        VICTORY_WARMUP_RESTART = '0'
+        VICTORY_TEXTURE_CATCHUP = '1'
+    }
+    $env:VICTORY_OMEGA_LAUNCH = ($options.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join [char]10
+    $launch = @('play', $Exe)
+    foreach ($key in $More.Keys) { $launch += '--set', "$key=$($More[$key])" }
+    try { & $victory @launch } finally { Remove-Item Env:VICTORY_OMEGA_LAUNCH }
     exit $LASTEXITCODE
 }
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }

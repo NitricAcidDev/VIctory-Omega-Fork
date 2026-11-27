@@ -4,25 +4,49 @@
 
 ## Run Victory Omega on Windows
 
-Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti 16 GB is the local Windows test card. Select your own complete Xbox dump in Omega Launcher. To launch from PowerShell instead:
+Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti 16 GB is the local Windows test card. To build, install Git, Rust via rustup, Visual Studio Build Tools with **Desktop development with C++** and a Windows SDK, and the .NET 10 SDK. Run these commands in PowerShell:
 
 ```powershell
-.\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Build release
+git clone --branch primary https://github.com/NitricAcidDev/VIctory-Omega-Fork.git
+Set-Location VIctory-Omega-Fork
+.\Build-Victory.ps1 -Diagnostics
+Start-Process '.\Omega Launcher.lnk'
 ```
 
-Omega Launcher defaults to Series S at 1080p with ray tracing off. F3 toggles the performance overlay in a diagnostics build. Alt+Enter toggles borderless fullscreen. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+In Omega Launcher, browse to your own complete Xbox game folder and select **Launch game**. The default profile is Series S at 1080p with ray tracing off. F3 toggles the performance overlay in a diagnostics build. Alt+Enter toggles borderless fullscreen. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
 
-To build from this checkout, install the pinned Rust toolchain, the MSVC C++ build tools with a Windows SDK, and the .NET 10 SDK. Run `.\Build-Victory.ps1` to build the game and launcher together. Add `-Diagnostics` to build the executable used by **FPS HUD and logs**.
+`Build-Victory.ps1 -Diagnostics` builds the game in `target\diag` and the launcher in `target\omega-launcher`. Omit `-Diagnostics` for a release build. To put the shortcut in an existing Victory folder, add `-ShortcutDirectory 'E:\Victory'`.
 
 **Shadow boost** is off by default. Turn it on to lift the darkest areas of the diffuse lighting with ray tracing off. **Original graphics** bypasses the lighting and reflection corrections. **Low-memory mode** uses smaller buffer-copy windows.
 
-Omega Launcher uses `%LOCALAPPDATA%\victory\data` for saves and `%LOCALAPPDATA%\victory\cache` for cache files. When the shortcut starts in the legacy Victory root, the launcher copies missing files from its `data` and `cache\cache-coolfox` folders on first launch. The old files stay in place. PowerShell users can supply `-LegacyRoot <folder>` to select another legacy root. Explicit `VICTORY_DATA_DIR` and `VICTORY_CACHE_DIR` values take precedence.
+### Migrate an existing installation
+
+Close Victory normally and run the migrator from this checkout. Use the old Victory folder that contains `data`.
+
+```powershell
+.\scripts\Migrate-VictoryStorage.ps1 -LegacyRoot 'E:\Victory'
+```
+
+The migrator copies missing files into `%LOCALAPPDATA%\victory\data` and `%LOCALAPPDATA%\victory\cache`, merges the early pipeline list, and keeps the old folders as a backup. It uses the old `cache\cache-coolfox` directory when present and the old `cache` directory otherwise. The launcher also runs it when the shortcut opens from a recognized legacy root. PowerShell users can pass `-LegacyRoot` to `play.ps1`. Explicit storage directories take precedence for the default Omega runner. The NVIDIA runner uses its own compiled cache and the same saves.
 
 ### NVIDIA fork features and Omega support
 
 In Omega Launcher, **Omega Trainer** sets the runtime frame limit and can enable audio tracing for the next launch. The NVIDIA runner option enables DLSS Super Resolution and opens its graphics menu with **F1** in game. Use that menu for the DLSS mode and Frame Generation.
 
-Run `scripts\Build-OmegaNvidia.ps1` to build the [VIctory-NVIDIA runner](https://github.com/trustno1-coder/VIctory-NVIDIA/releases) with the Omega caption and icon. The script installs it under `%LOCALAPPDATA%\victory\nvidia-runner`. Run the installed `victory.exe get-dlss` to install NVIDIA Streamline. Select the NVIDIA runner in Omega Trainer or use `scripts\play.ps1 -Nvidia`. The two runners use the same saves and separate compiled caches. The NVIDIA runner applies its own graphics settings and uses 1440p output for its default Series X profile. The default Omega runner uses the game's existing upscaler. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
+Build the optional NVIDIA runner and install Streamline once:
+
+```powershell
+.\scripts\Build-OmegaNvidia.ps1
+& "$env:LOCALAPPDATA\victory\nvidia-runner\omega-options-v1\victory.exe" get-dlss
+```
+
+Reopen Omega Launcher, select **Omega Trainer**, enable the NVIDIA runner, then select **Apply**. You can also launch it directly with the command below. The build script uses the pinned release source. [VIctory-NVIDIA releases](https://github.com/trustno1-coder/VIctory-NVIDIA/releases)
+
+```powershell
+.\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Console series-s -Nvidia -Dlss quality -FrameGeneration 0
+```
+
+For a fresh NVIDIA launch, Omega Launcher applies the console, ray tracing, graphics, low-memory and diagnostics choices. Omega Trainer controls DLSS, Frame Generation and the frame limit. Game default uses 30 FPS. Original graphics uses the game's upscaler and lighting. F1 still saves its settings and can restart the game when requested. The launcher skips the automatic first-run restart and gives streamed textures more time to catch up when the queue is large. Series X defaults to 1440p in the NVIDIA runner. [RTX 5060 Ti performance report](docs/performance-nvidia.md)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
@@ -73,28 +97,19 @@ What is known to be wrong:
   (`victory warm` makes them ahead).
 - Recording a frame in the world makes the title's own watchdog end it.
 
-## How to run it
-
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
+## Launch from PowerShell
 
 ```powershell
-git clone https://github.com/NitricAcidDev/VIctory-Omega-Fork
-cd VIctory-Omega-Fork
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
+.\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Console series-s -Build diag -PerformanceLog
 ```
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. Use `-RayTracing` to test ray-traced indirect light. Use `-Console series-x` to select the Series X profile, which can render at 4K.
+Use `-Build release` if you built without `-Diagnostics`. Use `-Safe` to try the more conservative submission settings, or `-RayTracing` to test experimental ray-traced indirect light. `-Console series-x` selects the higher-resolution profile.
 
 Before the first run, ahead of time (both can be stopped and go on later):
 
 ```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+.\target\diag\victory.exe shaders 'D:\Games\MyDump\shaders.rpf' 'D:\Games\MyDump\game_scarlett_master.exe'
+.\target\diag\victory.exe warm --used
 ```
 
 Commands, debugging switches and upstream's own description:

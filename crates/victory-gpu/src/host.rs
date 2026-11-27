@@ -7775,6 +7775,63 @@ fn split_line(frames: f64) {
 /// spread over the threads kept for the snapshots (`crate::shadow::wide`).
 /// The write-watch journal and the guards are behind their own locks, as
 /// they are for the title's threads.
+/// Whether a batch of `spans` refreshes over `bytes` of copies is done on the
+/// submitting thread itself rather than spread over the kept threads
+/// (`VICTORY_REFRESH_INLINE=<spans>,<KiB>`: at most that many over at most
+/// that much; `1` for 16 over 2048 KiB; unset or `0`: always spread, as
+/// before).
+///
+/// A submission flushes its refreshes some 40 times a frame, most of them a
+/// handful of copies of which the write watch finds a few pages changed;
+/// each flush woke the six threads and waited for the last, and with every
+/// processor busy a woken thread runs a while later (RTX 5080, 9900X, the
+/// boat, 27 Nov: refreshes 9.7 ms of the submitting thread's 33).
+fn inline_batch(spans: usize, bytes: usize) -> bool {
+    static SET: OnceLock<(usize, usize)> = OnceLock::new();
+    let (most, kib) = *SET.get_or_init(|| inline_of(std::env::var("VICTORY_REFRESH_INLINE").ok().as_deref()));
+    #[cfg(feature = "diagnostics")]
+    let (most, kib) = match crate::ab::pick("VICTORY_REFRESH_INLINE") {
+        Some(true) if most == 0 => INLINE_ON,
+        Some(true) => (most, kib),
+        Some(false) => (0, 0),
+        None => (most, kib),
+    };
+    spans <= most && bytes <= kib << 10
+}
+
+/// [`inline_batch`] when it is on without numbers: spans, KiB.
+const INLINE_ON: (usize, usize) = (16, 2048);
+
+fn inline_of(value: Option<&str>) -> (usize, usize) {
+    match value.map(str::trim) {
+        None | Some("" | "0") => (0, 0),
+        Some("1") => INLINE_ON,
+        Some(v) => {
+            let mut parts = v.split(',').map(|p| p.trim().parse::<usize>().ok());
+            match (parts.next().flatten(), parts.next().flatten()) {
+                (Some(spans), Some(kib)) => (spans, kib),
+                (Some(spans), None) => (spans, INLINE_ON.1),
+                _ => (0, 0),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::{INLINE_ON, inline_of};
+
+    #[test]
+    fn inline_batch_settings() {
+        assert_eq!(inline_of(None), (0, 0));
+        assert_eq!(inline_of(Some("0")), (0, 0));
+        assert_eq!(inline_of(Some("1")), INLINE_ON);
+        assert_eq!(inline_of(Some("8, 512")), (8, 512));
+        assert_eq!(inline_of(Some("32")), (32, INLINE_ON.1));
+        assert_eq!(inline_of(Some("x")), (0, 0));
+    }
+}
+
 fn wide_refresh() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
@@ -8219,7 +8276,9 @@ impl Batch {
         }
         #[cfg(feature = "diagnostics")]
         FLUSHES[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
-        crate::shadow::wide_each(spans.len() + due.len(), move |i| {
+        let here = !many && due.is_empty() && inline_batch(spans.len(), spans.iter().map(|s| s.2 - s.1).sum());
+        let n = spans.len() + due.len();
+        let work = move |i: usize| {
             // The textures first: they are the longer pieces.
             let Some(i) = i.checked_sub(due.len()) else {
                 due[i].refresh();
@@ -8232,7 +8291,12 @@ impl Batch {
                 return;
             }
             Self::update(shadow, *from, *to);
-        });
+        };
+        if here {
+            (0..n).for_each(work);
+        } else {
+            crate::shadow::wide_each(n, work);
+        }
         if ahead {
             crate::watch::ask_ahead_done();
         }
@@ -8386,7 +8450,10 @@ impl Batch {
             crate::watch::ask_ahead(&ranges);
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
-        if wide_refresh() && self.refreshes.len() >= 4 {
+        if wide_refresh()
+            && self.refreshes.len() >= 4
+            && !inline_batch(self.refreshes.len(), self.refreshes.iter().map(|r| r.2 - r.1).sum())
+        {
             // Each copy on its own, several at a time: a copy's refresh
             // writes that copy and reads title memory, nothing of another's.
             // The time counted is the time it took, not the threads' sum.

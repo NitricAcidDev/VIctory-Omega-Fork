@@ -126,6 +126,9 @@ struct Card {
     sent: Mutex<SentRuns>,
     /// Whether something was put into `dirty` since it was last taken.
     touched: std::sync::atomic::AtomicBool,
+    /// The copy itself, once it is among [`CARDED`]: what goes into
+    /// [`TOUCHED`] when `touched` is set.
+    me: std::sync::OnceLock<std::sync::Weak<Shadow>>,
     /// The buffers' bytes (the title buffer's, rounded up to 64 KiB).
     size: u64,
 }
@@ -308,6 +311,46 @@ pub(crate) fn card_room_kept() -> u64 {
 
 /// The copies in the card's memory.
 static CARDED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
+
+/// The copies in the card's memory whose `touched` was set since
+/// [`card_dirty`] last took this (a copy at most once between two takes,
+/// but it may be here twice: the second time it is passed over).
+static TOUCHED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
+
+/// A copy that is not among [`CARDED`] (no `me`) was touched: the next
+/// [`card_dirty`] looks at every copy.
+static UNLISTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether [`card_dirty`] looks only at the copies in [`TOUCHED`]
+/// (`VICTORY_CARD_TOUCHED`, on unless `0`), not at every copy in the
+/// card's memory.
+///
+/// It looked at all of them, some 3,600 in the owner's save, at every
+/// submission (17 a frame): 4% of the submitting thread's samples were that
+/// walk (RTX 5080, 9900X, 27 Nov), for the few dozen with something to send.
+fn card_touched_list() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_TOUCHED").is_none_or(|v| v != "0"));
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_CARD_TOUCHED") {
+        return on;
+    }
+    on
+}
+
+/// `shadow`, a copy in the card's memory, is one of [`CARDED`] from now on.
+fn register_carded(shadow: &Arc<Shadow>) {
+    CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(shadow));
+    if let Some(card) = &shadow.card {
+        let _ = card.me.set(Arc::downgrade(shadow));
+        std::sync::atomic::fence(Ordering::SeqCst);
+        // Touched before it had a `me` (and so maybe passed over by a look
+        // at every copy that came before it was listed): on the list now.
+        if card.touched.load(Ordering::Acquire) {
+            TOUCHED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(shadow));
+        }
+    }
+}
 
 /// Since the last frame line: bytes copied to card sides and the ranges
 /// they were; pieces compared on the card, pieces fetched and their
@@ -617,13 +660,10 @@ impl SentRuns {
 /// be merged came after are dropped.
 pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)> {
     let mut out = Vec::new();
-    let mut carded = CARDED.lock().unwrap_or_else(|e| e.into_inner());
     let fetched = RELAY_FETCHED.load(Ordering::Acquire);
-    carded.retain(|weak| {
-        let Some(shadow) = weak.upgrade() else {
-            return false;
-        };
-        let ranges = shadow
+    // What a copy has to send, if its `touched` was set: taken.
+    let take = |shadow: &Shadow| -> Vec<(usize, usize)> {
+        shadow
             .card
             .as_ref()
             .filter(|c| c.touched.swap(false, Ordering::AcqRel))
@@ -637,7 +677,33 @@ pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)
                 }
                 ranges
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
+    let touched = std::mem::take(&mut *TOUCHED.lock().unwrap_or_else(|e| e.into_inner()));
+    let unlisted = UNLISTED.swap(false, Ordering::AcqRel);
+    if card_touched_list() && !unlisted {
+        for weak in touched {
+            let Some(shadow) = weak.upgrade() else {
+                continue;
+            };
+            let ranges = take(&shadow);
+            if !ranges.is_empty() {
+                out.push((shadow, ranges));
+            }
+        }
+        // The copies let go of are dropped from the list now and then.
+        static TAKES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if TAKES.fetch_add(1, Ordering::Relaxed) % 256 == 255 {
+            CARDED.lock().unwrap_or_else(|e| e.into_inner()).retain(|w| w.strong_count() > 0);
+        }
+        return out;
+    }
+    let mut carded = CARDED.lock().unwrap_or_else(|e| e.into_inner());
+    carded.retain(|weak| {
+        let Some(shadow) = weak.upgrade() else {
+            return false;
+        };
+        let ranges = take(&shadow);
         if !ranges.is_empty() {
             out.push((shadow, ranges));
         }
@@ -1599,6 +1665,10 @@ pub(crate) fn wide_run(jobs: Vec<Box<dyn FnOnce() + Send>>) {
 /// this one, the next number to whichever is free: for thousands of small
 /// pieces of work, where a job each ([`wide`]) is mostly the jobs' queue.
 pub(crate) fn wide_each(n: usize, work: impl Fn(usize) + Send + Sync + 'static) {
+    if n >= 2 && each_by_items() {
+        wide_each_items(n, work);
+        return;
+    }
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let work = Arc::new(work);
     let threads = (wide_threads() + 1).min(n);
@@ -1619,8 +1689,113 @@ pub(crate) fn wide_each(n: usize, work: impl Fn(usize) + Send + Sync + 'static) 
     wide(jobs);
 }
 
+/// Whether [`wide_each`] returns once every number is done, not once every
+/// thread it woke has had its turn (`VICTORY_EACH_ITEMS`, on unless `0`).
+///
+/// Each kept thread took a job that asks for numbers until there are none
+/// left, and the caller waited for all the jobs. A thread woken while every
+/// processor was busy ran its job only when the work was long done, and
+/// found nothing to do; the submitting thread waited for it all the same: a
+/// quarter of its samples were waits, a third of those under `wide_each`
+/// (RTX 5080, 9900X, the owner's save of 26 Nov, sampled 27 Nov). Here the
+/// numbers done are counted and the caller waits for the last of them; a
+/// late thread finds none and is gone. Turn by turn in that save (30 pairs
+/// of 8 s): frames 0.5 ms shorter, in 19 of the 30.
+fn each_by_items() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_EACH_ITEMS").is_none_or(|v| v != "0"));
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_EACH_ITEMS") {
+        return on;
+    }
+    on
+}
+
+/// [`wide_each`] with [`each_by_items`]: what the caller and the threads share.
+struct Each<W> {
+    next: std::sync::atomic::AtomicUsize,
+    done: std::sync::atomic::AtomicUsize,
+    n: usize,
+    work: W,
+    finished: Mutex<bool>,
+    all: std::sync::Condvar,
+}
+
+impl<W: Fn(usize)> Each<W> {
+    /// Takes numbers and does them until there are none; whoever does the
+    /// last one says so.
+    fn run(&self) {
+        loop {
+            let i = self.next.fetch_add(1, Ordering::Relaxed);
+            if i >= self.n {
+                return;
+            }
+            (self.work)(i);
+            if self.done.fetch_add(1, Ordering::AcqRel) + 1 == self.n {
+                *self.finished.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                self.all.notify_all();
+            }
+        }
+    }
+}
+
+fn wide_each_items<W: Fn(usize) + Send + Sync + 'static>(n: usize, work: W) {
+    let each = Arc::new(Each {
+        next: std::sync::atomic::AtomicUsize::new(0),
+        done: std::sync::atomic::AtomicUsize::new(0),
+        n,
+        work,
+        finished: Mutex::new(false),
+        all: std::sync::Condvar::new(),
+    });
+    let workers = workers();
+    let helpers = wide_threads().min(n - 1);
+    {
+        let mut queue = workers.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..helpers {
+            let each = each.clone();
+            workers.there.fetch_add(1, Ordering::AcqRel);
+            queue.push_back(Box::new(move || each.run()));
+        }
+    }
+    workers.more.notify_all();
+    let _wide = crate::timeline::span("work spread over threads");
+    each.run();
+    if each.done.load(Ordering::Acquire) == n {
+        return;
+    }
+    // The last numbers are being done by threads that took them.
+    spin(|| each.done.load(Ordering::Acquire) == n);
+    let mut finished = each.finished.lock().unwrap_or_else(|e| e.into_inner());
+    while !*finished {
+        finished = each.all.wait(finished).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
 /// About this many bytes to a piece of work for [`wide`].
 const WIDE_JOB: usize = 1 << 20;
+
+#[cfg(test)]
+mod each_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Every number once, all of them done when the call returns, again and
+    /// again with the late threads of the calls before still about.
+    #[test]
+    fn every_number_is_done_once_before_the_call_returns() {
+        for n in [2usize, 3, 7, 64, 1000] {
+            for _ in 0..20 {
+                let seen: Arc<Vec<AtomicU32>> = Arc::new((0..n).map(|_| AtomicU32::new(0)).collect());
+                let s = seen.clone();
+                super::wide_each_items(n, move |i| {
+                    s[i].fetch_add(1, Ordering::Relaxed);
+                });
+                assert!(seen.iter().all(|c| c.load(Ordering::Relaxed) == 1), "n {n}");
+            }
+        }
+    }
+}
 
 /// With [`wide_back`]: the snapshots noted while a submission is prepared
 /// (from, to, bytes), taken by [`take_snapshots`].
@@ -4336,7 +4511,12 @@ impl Shadow {
             }
         }
         // (Under the lock: what takes the list sees it or finds it set.)
-        card.touched.store(true, Ordering::Release);
+        if !card.touched.swap(true, Ordering::AcqRel) {
+            match card.me.get() {
+                Some(me) => TOUCHED.lock().unwrap_or_else(|e| e.into_inner()).push(me.clone()),
+                None => UNLISTED.store(true, Ordering::Release),
+            }
+        }
     }
 
     /// Whether shaders were ever declared to write it.
@@ -4633,6 +4813,7 @@ impl Shadow {
                 dirty: Mutex::default(),
                 sent: Mutex::default(),
                 touched: Default::default(),
+                me: Default::default(),
                 size: len.next_multiple_of(PIECE as u64),
             });
         }
@@ -4789,6 +4970,7 @@ mod land_tests {
             dirty: Mutex::default(),
             sent: Mutex::default(),
                 touched: Default::default(),
+                me: Default::default(),
             size: len as u64,
         });
         Some(shadow)
@@ -5210,6 +5392,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
                     dirty: Mutex::default(),
                     sent: Mutex::default(),
                 touched: Default::default(),
+                me: Default::default(),
                     size,
                 };
                 (on_card, Some(card))
@@ -5235,7 +5418,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         shadow.card = card;
         let shadow = Arc::new(shadow);
         if shadow.card.is_some() {
-            CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+            register_carded(&shadow);
         }
         entry.shadow = Some(shadow);
     }
@@ -5438,10 +5621,11 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
         dirty: Mutex::default(),
         sent: Mutex::default(),
         touched: Default::default(),
+        me: Default::default(),
         size: len,
     });
     let shadow = Arc::new(shadow);
-    CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+    register_carded(&shadow);
     Some(shadow)
 }
 
@@ -5527,6 +5711,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
                 dirty: Mutex::default(),
                 sent: Mutex::default(),
                 touched: Default::default(),
+                me: Default::default(),
                 size: len,
             };
             (on_card, Some(card))
@@ -5545,7 +5730,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     shadow.card = card;
     let shadow = Arc::new(shadow);
     if shadow.card.is_some() {
-        CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+        register_carded(&shadow);
     }
     note(&shadow);
     map.insert((start, len), shadow.clone());

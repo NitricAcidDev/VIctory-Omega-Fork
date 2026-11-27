@@ -64,10 +64,81 @@ Update-NvidiaSource 'crates/victory-gpu/src/host.rs' {
     $text = $text.Replace("        CreateWindowExW(`n            WINDOW_EX_STYLE(0),`n            CLASS,", "        let hwnd = CreateWindowExW(`n            WINDOW_EX_STYLE(0),`n            CLASS,")
     $text.Replace("            Some(instance.into()),`n            None,`n        )", "            Some(instance.into()),`n            None,`n        )?;`n        crate::omega_window::brand(hwnd.0);`n        Ok(hwnd)")
 }
-Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+$graphicsMenuBranding = {
     param($text)
     $text.Replace('SETTINGS                       F1 OR ESC CLOSES', 'OMEGA GRAPHICS                 F1 OR ESC CLOSES')
 }
+Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+    param($text)
+    $text = & $graphicsMenuBranding $text
+    $text = $text.Replace('VK_ESCAPE, VK_F1, VK_LEFT', 'VK_ESCAPE, VK_F1, VK_F5, VK_LEFT')
+    $text = $text.Replace('[u16; 7] = [VK_F1, VK_UP', '[u16; 8] = [VK_F1, VK_F5, VK_UP')
+    $text = $text.Replace('    failed: bool,', "    failed: bool,`n    world_open: bool,")
+    $text = $text.Replace('failed: false }', 'failed: false, world_open: false }')
+    $text = $text.Replace('    fn lines(&self) -> Vec<String> {', @'
+    fn toggle_page(&mut self, vk: u16, open: bool) -> bool {
+        let next = match vk {
+            VK_F1 => !open || self.world_open,
+            VK_F5 => !open || !self.world_open,
+            VK_ESCAPE if open => false,
+            _ => return false,
+        };
+        self.world_open = next && vk == VK_F5;
+        self.note.clear();
+        self.changed = true;
+        crate::SETTINGS_MENU_OPEN.store(next, Ordering::Relaxed);
+        true
+    }
+
+    fn lines(&self) -> Vec<String> {
+        if self.world_open {
+            return [
+                "OMEGA WORLD                    F5 OR ESC CLOSES",
+                "F1 OPENS GRAPHICS",
+                "",
+                "  WEATHER                      UNAVAILABLE",
+                "  TIME                         UNAVAILABLE",
+                "  DATE                         UNAVAILABLE",
+                "",
+                "THIS RUNNER HAS NO WORLD CONTROL CONNECTION.",
+            ].into_iter().map(str::to_owned).collect();
+        }
+'@)
+    $originalKeys = @'
+            if vk == VK_F1 || (open && vk == VK_ESCAPE) {
+                crate::SETTINGS_MENU_OPEN.store(!open && vk == VK_F1, Ordering::Relaxed);
+                self.note.clear();
+                self.changed = true;
+                continue;
+            }
+            if !open {
+'@
+    if (!$text.Contains($originalKeys)) { throw 'Could not find the NVIDIA menu key handler.' }
+    $text = $text.Replace($originalKeys, @'
+            if self.toggle_page(vk, open) || !open || self.world_open {
+'@)
+    $text.Replace("mod tests {`n    use super::*;", @'
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_page_switches_without_leaking_graphics_input() {
+        let mut menu = Menu::new();
+        assert!(menu.toggle_page(VK_F5, false));
+        assert!(Menu::open() && menu.world_open);
+        assert!(menu.lines().iter().all(|line| line.len() <= COLUMNS as usize));
+        assert!(menu.toggle_page(VK_F1, true));
+        assert!(Menu::open() && !menu.world_open);
+        assert!(menu.toggle_page(VK_F5, true));
+        assert!(Menu::open() && menu.world_open);
+        assert!(menu.toggle_page(VK_F5, true));
+        assert!(!Menu::open() && !menu.world_open);
+        assert!(menu.toggle_page(VK_F5, false));
+        assert!(menu.toggle_page(VK_ESCAPE, true));
+        assert!(!Menu::open() && !menu.world_open);
+    }
+'@)
+} $graphicsMenuBranding
 Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
     param($text)
     $luma = 'static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);'

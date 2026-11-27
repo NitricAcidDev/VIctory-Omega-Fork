@@ -33,6 +33,8 @@ The migrator copies missing files into `%LOCALAPPDATA%\victory\data` and `%LOCAL
 
 Omega Launcher provides the frame limit and audio tracing on its main screen. Select the NVIDIA runner to enable the DLSS and Frame Generation controls. **F1** opens its graphics menu in game.
 
+**F5** opens the Omega World preview in the NVIDIA runner. The weather, time and date controls show as unavailable until a verified game-side interface is connected. Press F5 or Esc to close the panel, or F1 to switch to graphics.
+
 Build the optional NVIDIA runner and install Streamline once:
 
 ```powershell

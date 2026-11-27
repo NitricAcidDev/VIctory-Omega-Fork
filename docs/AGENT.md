@@ -395,6 +395,55 @@ over the old tip `d7dd13d`, which is in `primary`'s history):**
   `%LOCALAPPDATA%\victory-nitric\save-backups\saves-20261126-191238`; in a
   mission "Save Game" is greyed, the title saves when the mission ends.
 
+**Round 8 (27 Nov): Belobug's ideas on NVIDIA.** The owner pointed at
+[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)
+("stable 24-30 during gameplay", AMD) and asked to keep this build (the best
+on NVIDIA so far) and bring its ideas over. Remote `belobug` in
+`victory-coolfox`; a read-only clone in `runtime\build\victory-belobug`.
+Belobug and cool_fox part at `39031cb` (the 7900 XTX README): renderer ports
+5-7 came after, so cool_fox has none of them. Their README: about 45 ms a
+frame (22 fps) in a city street, Series S, ports 1, 2, 5, 6, 7 on (RX 7900
+XTX, i9-12900K). Ours in the owner's save (interior, Series S): 47-48 ms
+before this round.
+
+What needs doing, and where each stands (one line per item; update it when
+it moves):
+
+| # | Idea (Belobug commits) | Their measured gain | On the RTX 5080 | Status |
+|---|---|---|---|---|
+| 1 | `card_dirty` visits only copies that changed (ours, `1721b71`, `VICTORY_CARD_TOUCHED`, on) | - | 30 A/B pairs: faster in 28, median 48.4 -> 47.3 ms | **done, on** |
+| 2 | Port 6, `VICTORY_PORT_GUARD` (`9d723e88`, `2edf8446`, `65f9707d`, `00ab2acf`, `8f02bf74`, `88b63a2c`): the guards' lock shared by faults and refreshes, a claim per 64 KiB block; refresh planning on the threads beside the submitting one | title threads' waits 29 -> 2 ms a frame; -2 ms | - | **ported** to `coolfox-speed` (cherry-picked, `-x`); `GUARDS` is now an `RwLock`: our `VICTORY_GUARD_SPIN` and the diagnostics hold report (`GuardsHeld`) work on its write side. In-run A/B in the save (15 cycles of 4): 47.3 -> 46.5 ms, faster in 13 of 15; with port 7 too 47.1 -> 45.5 ms, faster in 14 of 14, no crash. **On in the launcher** (`VICTORY_PORT_GUARD=1`) |
+| 3 | Port 7, `VICTORY_PORT_JOURNAL` (`673be0ea`, `a609a2fc`, `a39509f5`): heap records asked for at the title's submit; the journal's notes in 64 parts with their own locks | submit thread waits ~6 -> 0.3 ms; -1 to -3 ms | - | **ported** (cherry-picked; the one conflict was in tests: their `rearm_tests` needs `rearm_guard`, which cool_fox lacks, and was left out); `cargo test -p victory-gpu` 371 passed. Same A/B: 47.3 -> 46.5 ms, faster in 14 of 15. **On in the launcher** (`VICTORY_PORT_JOURNAL=1`) |
+| 4 | Frame rate switch, `VICTORY_FRAME_INTERVAL_MS` (`49cb83b4`, `08b88b82`): our clock and the title's own 30 fps setting patched (byte-checked) | menus and videos at 60 | the owner saw a 30 cap in game | **ported** (`6c51495c`, `2488e015`); `frame.rs` merged: `VICTORY_FPS_LIMIT` (ours) first, then `VICTORY_FRAME_INTERVAL_MS`, then the title's. The title's own 30 is patched only with `VICTORY_FRAME_INTERVAL_MS` set (its bytes checked; the log says how many of the loads were patched). To run: `VICTORY_FRAME_INTERVAL_MS=16.667` with `VICTORY_FPS_LIMIT` unset |
+| 5 | Port 5, `VICTORY_PORT_CBV` (`3920dc26`): shaders read constant buffers as raw bytes, in place in title memory | ~22,000 fills a frame to none; -4.7 ms | in place only with port 1, which is 3x slower here (below) | after 6 |
+| 6 | Ports 1 and 2 (`VICTORY_PORT_CONSTANTS`, `_DESCRIPTORS`; already in cool_fox) | -4 to -20 ms | 1: the card reads the 174 MB constants heap over the bus, frames 3x as long; 2 without 1: posterized | find why 1 is slow here (heap kind, ReBAR / GPU upload heap) |
+| 7 | Textures uploaded in the submission's prelude (`5d6bd841`): frame order, flicker | - | - | to look at |
+| 8 | `VICTORY_OUTPUT` (`e151e71f`, `45cad4c5`) | -16 ms card time (Series X) | the launcher already runs Series S (1080p); the frame is set by the CPU | not needed now |
+| 9 | `VICTORY_PORT_GUARD_PLAN` (part of port 6; refresh planning on side threads, from 4,096 steps) | - | on with port 6 by default | A/B it alone next |
+
+Branches after round 8: `coolfox-speed` (worktree `victory-coolfox`, what
+`Launch VIctory (cool_fox).bat` runs) has items 1-4. `primary` on GitHub
+had moved on (NitricAcidDev, `91760f47`..`0cd2744a`: Series S shading,
+geometry shaders, 1080p on NVIDIA, the Omega window); it was fast-forwarded
+here and `coolfox-speed` merged into it (tests: GPU 375, loader 46, shader
+299 passed). `secondary-test` on GitHub was found back at `d7dd13d` (the
+overwrite of 26 Nov undone by someone): left alone, not pushed over. The
+check run with the launcher (release, the save, 240 s): the title's 30
+patched (3 of 3 loads), 21-22 fps, picture right, no crash.
+
+Next, in this order:
+
+1. Item 6: why the card reading title memory in place (port 1) is 3x slower
+   on the RTX 5080. Look at the heap the 174 MB constants heap is made in
+   (`port.rs`, `OpenExistingHeapFromAddress` / custom heap, L0 system
+   memory); NVIDIA may read it uncached over the bus. With resizable BAR a
+   `D3D12_HEAP_TYPE_GPU_UPLOAD` heap (card memory the CPU writes) is the
+   NVIDIA way; then port 5 (item 5, -4.7 ms on AMD) can follow.
+2. Item 7 (texture uploads in the submission prelude): may fix late
+   textures and flicker.
+3. A fresh profile of `victory-submit` (`prof.ps1` in the scratchpad,
+   `profsum2.sh`): what is left after ports 6 and 7.
+
 ### From the RX 7900 XTX fork
 
 `avatarmanz/VIctory-7900XTX` (remote `xtx`; the owner's copy is

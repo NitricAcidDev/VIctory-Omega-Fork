@@ -434,6 +434,8 @@ here).** For the next agent:
   card's memory (6.4 ms); `VICTORY_UP_QUEUE` alone in a longer A/B; item 7
   (texture uploads in the prelude, against late textures and flicker).
 
+**Last update (27 Nov, 20:12; weekly usage 97%).** `primary` was fast-forwarded to NitricAcidDev's `b2a1fc0c` (Omega launcher, DLSS runner, NVIDIA descriptor-span reuse, reflection colour limits, XMA fixes) on top of round 8: release and diag build, GPU 378 and loader 46 tests pass. Its first start crawled at 4 fps in the intro cutscene because it translated shaders live (2,924 in the log): the translator changed, so the cache had to be refilled. Done with `victory shaders <game dir> --jobs 20` under `Launch VIctory.bat`'s own settings (25,974 in the cache, 11 wave64 compute programs do not translate, 112 s). Then `Launch VIctory.bat` (diag build of `primary`) was opened for the owner, not yet seen in game. Note: `Launch VIctory.bat` has none of round 8's launcher settings (`VICTORY_PORT_GUARD`, `VICTORY_PORT_JOURNAL`, `VICTORY_FRAME_INTERVAL_MS=16.667`, `VICTORY_WIDE_SPIN=100`); `Launch VIctory (cool_fox).bat` has them but runs `coolfox-speed` without NitricAcidDev's newest commits. Next: bring those settings into the launcher the owner uses for `primary` (or the Omega launcher), refill shaders under it, compare fps.
+
 What needs doing, and where each stands (one line per item; update it when
 it moves):
 

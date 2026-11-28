@@ -201,7 +201,10 @@ fn translate_listed(c: &[u8]) -> Result<HostShader, String> {
 /// form: fxceless #799); `all` adds those five. For every program the form once lost the card (`emit`).
 /// `VICTORY_WAVE_WIDE_ONLY`: a list of hashes in place of these, `none` for
 /// none.
-const WAVE_WIDE_DEFAULT: [&str; 15] = [
+const WAVE_WIDE_DEFAULT: [&str; 16] = [
+    // sr_tracing: CS_Tiling_Generate_Opaque. Preserve the console wave
+    // when building the tiles used by the bottom of the reflection image.
+    "2cc4c197ee29e291",
     // shadowmask: CS_GenerateShadowMasksHairOnly_SampleHairScreenSpace, CS_GenerateShadowMasks_SampleHairScreenSpace
     "888af37a584acf98",
     "2889c21328c69e58",

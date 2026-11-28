@@ -4,7 +4,20 @@
 
 ## Run the codec_d Windows build
 
+<<<<<<< Updated upstream
 Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+=======
+Build the game and Omega Launcher together with `./Build-Victory.ps1`. The
+launcher build requires the .NET 10 SDK and runs on the .NET 10 Desktop
+Runtime. Open the generated **Omega Launcher** shortcut, browse for the folder
+containing `game_scarlett_master.exe`, select a profile, and launch the game.
+Use `-ShortcutDirectory` on the build script to place the shortcut elsewhere.
+
+Both profiles present at up to 1080p. Series S is the profile that renders
+the 1080p frame. Series X still uses higher-resolution internal buffers.
+
+Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti is the local Windows test card. Open PowerShell in the build folder and point the launcher at your own complete Xbox dump.
+>>>>>>> Stashed changes
 
 ```powershell
 $env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
@@ -81,7 +94,11 @@ scripts\play.ps1 -Exe <path of your copy's executable>
 ```
 
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
+<<<<<<< Updated upstream
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+=======
+something is wrong. Use `-Console series-x` for the Series X profile, which can render at 4K and shares the Series S texture residency and buffer allocation settings. Ray tracing is off by default. Screen-space reflections can use visible scene geometry. The renderer uses environment or probe data for misses. Use `-RayTracing` to test reflections that trace geometry outside the current view. Coverage varies by material and scene.
+>>>>>>> Stashed changes
 
 Before the first run, ahead of time (both can be stopped and go on later):
 

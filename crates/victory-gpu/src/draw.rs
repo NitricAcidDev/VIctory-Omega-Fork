@@ -3157,8 +3157,12 @@ impl State {
         unsafe { list.list.Dispatch(x, y, z) };
         self.buffers_written();
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+        self.after_lighting_dispatch(list, p);
+    }
+
+    fn after_lighting_dispatch(&mut self, list: &HostList, p: &HostPipeline) {
         if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
-            && crate::ambient::on()
+            && crate::ambient::on(role)
             && self.ambient(list, p, role)
         {
             self.host_pipeline = 0;
@@ -4386,6 +4390,12 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            // The SSR history update may be dispatched indirectly. Apply the
+            // same output limit after execution. Leave diffuse passes on
+            // their direct path, which supplies their update cadence.
+            if p.stages.first().and_then(|s| s.shader.ambient) == Some(crate::ambient::Role::Reflections) {
+                self.after_lighting_dispatch(list, p);
+            }
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }

@@ -9239,15 +9239,27 @@ impl Host {
         overlay: Option<(&ID3D12Resource, u32)>,
         frame: u64,
     ) -> Option<bool> {
+        self.present_output(texture, state, overlay, frame, true)
+    }
+
+    fn present_output(
+        &self,
+        texture: &ID3D12Resource,
+        state: u32,
+        overlay: Option<(&ID3D12Resource, u32)>,
+        frame: u64,
+        scale_output: bool,
+    ) -> Option<bool> {
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
+        let base_view = crate::compose::view(&desc);
         let planes = overlay.and_then(|(over, over_state)| {
             // SAFETY: a live overlay resource.
             let over_desc = unsafe { over.GetDesc() };
             Some((
                 over,
                 D3D12_RESOURCE_STATES(over_state as i32),
-                crate::compose::view(&desc)?,
+                base_view?,
                 crate::compose::view(&over_desc)?,
             ))
         });
@@ -9260,7 +9272,16 @@ impl Host {
             };
             format
         };
-        let (width, height) = (desc.Width as u32, desc.Height);
+        let source = (desc.Width as u32, desc.Height);
+        let (width, height) = if scale_output && base_view.is_some() && output_1080p()
+            && (source.0 > 1920 || source.1 > 1080)
+        {
+            let scale = (1920.0 / f64::from(source.0)).min(1080.0 / f64::from(source.1));
+            ((f64::from(source.0) * scale).round() as u32, (f64::from(source.1) * scale).round() as u32)
+        } else {
+            source
+        };
+        let use_composer = planes.is_some() || (width, height) != source;
         let mut presenter = self.presenter.lock().unwrap_or_else(|e| e.into_inner());
         if presenter.is_none() {
             *presenter = match self.presenter(width, height, format) {
@@ -9273,16 +9294,6 @@ impl Host {
         }
         let state_u32 = state;
         let p = presenter.as_mut()?;
-        if planes.is_some() && p.composer.is_none() {
-            match crate::compose::Composer::new(self, format) {
-                Ok(c) => p.composer = Some(c),
-                Err(e) => {
-                    tracing::warn!(error = %e, "two-plane composer not made; showing base plane only");
-                    drop(presenter);
-                    return self.present_planes(texture, state_u32, None, frame);
-                }
-            }
-        }
         if (p.width, p.height, p.format) != (width, height, format) {
             // Presents sent ahead hold back buffers until they have run.
             settle_now(WHY_SYNC);
@@ -9312,13 +9323,13 @@ impl Host {
                 }
             }
         }
-        if planes.is_some() && p.composer.is_none() {
+        if use_composer && p.composer.is_none() {
             match crate::compose::Composer::new(self, format) {
                 Ok(c) => p.composer = Some(c),
                 Err(e) => {
-                    tracing::warn!(error = %e, "two-plane composer not made after resize; showing base plane only");
+                    tracing::warn!(error = %e, "display compositor unavailable; showing the original base plane");
                     drop(presenter);
-                    return self.present_planes(texture, state_u32, None, frame);
+                    return self.present_output(texture, state_u32, None, frame, false);
                 }
             }
         }
@@ -9354,14 +9365,15 @@ impl Host {
             copy.reset();
             copy.keep(texture);
             let list = &copy.list;
-            let composed = if let Some((over, over_state, base_fmt, over_fmt)) = planes {
-                copy.keep(over);
+            let composed = if use_composer {
+                let base_fmt = base_view?;
+                if let Some((over, ..)) = planes { copy.keep(over); }
                 if let Some(composer) = p.composer.as_mut() {
                     let mut pre = Vec::with_capacity(3);
                     if state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
                         pre.push(transition(texture, state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
                     }
-                    if over_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
+                    if let Some((over, over_state, ..)) = planes && over_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
                         pre.push(transition(over, over_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
                     }
                     pre.push(transition(&back, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
@@ -9371,7 +9383,7 @@ impl Host {
                         self,
                         compose_slot,
                         list,
-                        [(texture, base_fmt), (over, over_fmt)],
+                        [(Some(texture), base_fmt), (planes.map(|x| x.0), planes.map_or(DXGI_FORMAT_R8G8B8A8_UNORM, |x| x.3))],
                         &back,
                         (width, height),
                     ) {
@@ -9379,7 +9391,7 @@ impl Host {
                         drop(back);
                         drop(presenter);
                         tracing::warn!(%err, "could not record display composite; presenting the base plane");
-                        return self.present_planes(texture, state_u32, None, frame);
+                        return self.present_output(texture, state_u32, None, frame, false);
                     }
                     static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !ONCE.swap(true, Ordering::Relaxed) {
@@ -9388,15 +9400,16 @@ impl Host {
                             width,
                             height,
                             base_format = base_fmt.0,
-                            overlay_format = over_fmt.0,
-                            "display output: compositing two planes (overlay active)"
+                            overlay = planes.is_some(),
+                            source = ?source,
+                            "display output: compositing the frame"
                         );
                     }
                     let mut post = Vec::with_capacity(3);
                     if state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
                         post.push(transition(texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, state));
                     }
-                    if over_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
+                    if let Some((over, over_state, ..)) = planes && over_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
                         post.push(transition(over, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, over_state));
                     }
                     post.push(transition(
@@ -9564,6 +9577,12 @@ impl Host {
             })
         }
     }
+}
+
+/// Keep the host swap chain within a 1080p display without changing the guest targets.
+fn output_1080p() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| crate::switch::on("VICTORY_OUTPUT_1080P"))
 }
 
 /// A visible top-level window of this process: the one the title made, if

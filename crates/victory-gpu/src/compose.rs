@@ -1,4 +1,4 @@
-﻿//! Two presented planes as one image: the console's display puts the second
+//! Two presented planes as one image: the console's display puts the second
 //! (the interface) over the first (the scene), each scaled to the screen.
 //! Grand Theft Auto VI presents so on Series S.
 
@@ -27,7 +27,7 @@ V vs(uint id : SV_VertexID) {
 float4 ps(V v) : SV_Target {
     float4 s = scene.SampleLevel(smooth_, v.uv, 0);
     float4 o = over.SampleLevel(smooth_, v.uv, 0);
-    return float4(saturate(o.rgb + s.rgb * (1 - saturate(o.a))), 1);
+    return float4(o.rgb + s.rgb * (1 - saturate(o.a)), 1);
 }
 "#;
 
@@ -121,7 +121,7 @@ impl Composer {
         host: &Host,
         slot: usize,
         list: &ID3D12GraphicsCommandList,
-        planes: [(&ID3D12Resource, DXGI_FORMAT); 2],
+        planes: [(Option<&ID3D12Resource>, DXGI_FORMAT); 2],
         back: &ID3D12Resource,
         (width, height): (u32, u32),
     ) -> windows::core::Result<()> {
@@ -161,7 +161,7 @@ impl Composer {
                     },
                 };
                 host.device
-                    .CreateShaderResourceView(Some(plane.0), Some(&desc), at);
+                    .CreateShaderResourceView(plane.0, Some(&desc), at);
             }
             let rtv = host.rtv(Some(back), None);
             list.OMSetRenderTargets(1, Some(&rtv), false, None);
@@ -261,6 +261,7 @@ mod tests {
         let base = texture(1);
         let overlay = texture(3);
         let output = texture(3);
+        let single = texture(1);
         let target = D3D12_RESOURCE_STATE_RENDER_TARGET;
         let read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         let cmds = &list.list;
@@ -290,7 +291,7 @@ mod tests {
                     host,
                     0,
                     cmds,
-                    [(&base, format), (&overlay, format)],
+                    [(Some(&base), format), (Some(&overlay), format)],
                     &output,
                     (3, 1),
                 )
@@ -300,6 +301,23 @@ mod tests {
                 target,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
+            compositor
+                .record(
+                    host,
+                    1,
+                    cmds,
+                    [(Some(&overlay), format), (None, format)],
+                    &single,
+                    (1, 1),
+                )
+                .unwrap();
+            cmds.ResourceBarrier(&[crate::host::transition(
+                &single,
+                target,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+            let (downscaled, single_footprint) =
+                crate::capture::read_back(&host.device, cmds, &single).unwrap();
             let (buffer, footprint) =
                 crate::capture::read_back(&host.device, cmds, &output).unwrap();
             list.close();
@@ -319,7 +337,16 @@ mod tests {
                     "unexpected composite {pixels:?}"
                 );
             }
-            eprintln!("D3D12 display-plane readback RGBA: {pixels:?}");
+            downscaled.Map(0, None, Some(&mut mapped)).unwrap();
+            let start = mapped.cast::<u8>().add(single_footprint.Offset as usize);
+            let pixel: [u8; 4] = std::slice::from_raw_parts(start, 4).try_into().unwrap();
+            downscaled.Unmap(0, None);
+            for (actual, expected) in pixel.into_iter().zip([0, 128, 0, 255]) {
+                assert!(
+                    actual.abs_diff(expected) <= 1,
+                    "unexpected single-plane output {pixel:?}"
+                );
+            }
         }
     }
 }

@@ -94,7 +94,21 @@ fn scene_input(shaders: &[Arc<Shader>]) -> bool {
                 | "068c90badc86f1fd"
                 | "e4a7e088c7780ce8"
                 | "ebe4e53f031f5249"
-                | "2cc4c197ee29e291"
+                | "2cc4c197ee29e291" // Opaque reflection tiles
+                | "7168dd781ca7efb9" // Opaque screen-space ray prepass
+                | "a14c1da4be7b9837" // Alpha reflection tiles
+                | "5e7cd6d3557a6c35" // Water reflection tiles
+                | "d2b169b82f67ec5b" // Alpha ray prepass
+                | "edb8e66237fc38e6" // Alpha screen-space ray prepass
+                | "11276d0c8bbe180a" // Water screen-space ray prepass
+                | "130d3d04172e5456" // Resolve hits against scene data
+                | "4be59685cba35bdf" // Resolve screen-space G-buffer hits
+                | "381b0f5373ee35d4" // Resolve ray visibility hits
+                | "bb85ae39b74872a7" // Resolve alpha G-buffer hits
+                | "3b91b8b7fbd36f87" // Resolve water G-buffer hits
+                | "b7953a05b189dfc1" // Fallback for alpha misses
+                | "06bb6e728c7c99bf" // Resolve ray misses
+                | "6fad2980c2774c90" // Update denoised reflection history
                 | "369cbe906ea72764"
         ) || crate::draw::BAKE_PIXEL_SHADERS.contains(&s.hash.as_str())
     })

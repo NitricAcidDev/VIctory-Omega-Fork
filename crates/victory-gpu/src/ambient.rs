@@ -34,7 +34,7 @@
 //! sky's light indoors too, a brown veil at sunset. `VICTORY_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::s;
@@ -63,7 +63,7 @@ pub(crate) fn role(container: &[u8]) -> Option<Role> {
         Some(Role::Radiance)
     } else if has(b"CS_AccumulateLocalLightInscatteringVolume") {
         Some(Role::Air)
-    } else if has(b"CS_UpdateHistory") {
+    } else if has(b"CS_UpdateHistory_e877ef6e") {
         Some(Role::Reflections)
     } else {
         None
@@ -101,9 +101,41 @@ fn set() -> Set {
     *SET.get_or_init(|| parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()))
 }
 
-/// Whether the stand-in is on: set, and the title's rays find nothing.
-pub(crate) fn on() -> bool {
-    set() != Set::Off && !crate::pipeline::builder_runs()
+/// Whether to run the fallback, or just bound reflection history with rays on.
+pub(crate) fn on(role: Role) -> bool {
+    set() != Set::Off
+        && (!crate::pipeline::builder_runs()
+            || (matches!(role, Role::Radiance | Role::Reflections) && rt_reflection_limit() > 0.0))
+}
+
+/// Peak limit for screen-space reflection history relative to local radiance.
+fn fallback_reflection_limit() -> f32 {
+    static LIMIT: OnceLock<f32> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("VICTORY_REFLECTION_LIMIT")
+            .ok()
+            .and_then(|value| value.trim().parse::<f32>().ok())
+            .filter(|limit| limit.is_finite() && *limit > 0.0)
+            .unwrap_or(0.5)
+    })
+}
+
+/// Optional absolute limit in the packed reflection target's linear units.
+fn reflection_ceiling() -> f32 {
+    static CEILING: OnceLock<f32> = OnceLock::new();
+    *CEILING.get_or_init(|| {
+        let value = std::env::var("VICTORY_REFLECTION_CEILING").unwrap_or_default();
+        floor_of(&value)
+    })
+}
+
+/// Optional peak limit for ray-traced reflection history relative to scene radiance.
+fn rt_reflection_limit() -> f32 {
+    static LIMIT: OnceLock<f32> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let limit = std::env::var("VICTORY_RT_REFLECTION_LIMIT").unwrap_or_default();
+        floor_of(&limit)
+    })
 }
 
 /// The most the air scatters, as a multiple of the light around
@@ -179,7 +211,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=12, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
+#define RS "RootConstants(num32BitConstants=13, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -189,6 +221,7 @@ cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
     float follow; float most; float air; float least;
+    float reflection_ceiling;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -320,8 +353,23 @@ void hold_reflections(uint3 at : SV_DispatchThreadID) {
     if (at.x >= width || at.y >= height) return;
     float3 reflected = unpack(light[at.xy]);
     float peak = max(reflected.r, max(reflected.g, reflected.b));
-    float cap = max(dot(cells[CELLS].rgb, LUMA), least) * follow;
-    if (peak > cap) light[at.xy] = pack(reflected * (cap / peak));
+    // Use the adjacent scene-radiance cells so bright sky and windows don't
+    // lift the whole room's reflection limit.
+    float2 grid = (float2(at.xy) + 0.5) / float2(width, height) * float2(CX, CY) - 0.5;
+    int2 base = int2(floor(grid));
+    float2 f = frac(grid);
+    float local = 0.0;
+    for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
+        int2 q = clamp(base + int2(i, j), int2(0, 0), int2(CX - 1, CY - 1));
+        float weight = (i ? f.x : 1.0 - f.x) * (j ? f.y : 1.0 - f.y);
+        local += dot(cells[q.y * CX + q.x].rgb, LUMA) * weight;
+    }
+    float reference = constant > 0.0 ? constant : max(local, 0.25 * dot(cells[CELLS].rgb, LUMA));
+    // Keep the specular limit independent of the diffuse lighting floor.
+    float cap = max(reference, 0.01) * follow;
+    if (reflection_ceiling > 0.0) cap = min(cap, reflection_ceiling);
+    float scale = min(1.0, cap / max(peak, 1e-6));
+    if (scale < 1.0) light[at.xy] = pack(reflected * scale);
 }
 
 [RootSignature(RS)]
@@ -519,32 +567,37 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     if role == Role::Air && (constant > 0.0 || air() == 0.0) {
         return false;
     }
-    static SAID: Mutex<u32> = Mutex::new(0);
-    {
-        let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-        if *said < 4 {
-            *said += 1;
-            tracing::info!(?role, size = ?views.size, level, constant, floor = floor(), "a stand-in for the indirect light");
-        }
-    }
+
     list.keep(&pass.cells);
     list.keep(&pass.points);
     let [strength, radius] = shade();
     // Reflections use the same estimate as the diffuse light for their cap.
-    let follow = if role == Role::Reflections { 0.5 } else { 0.45 };
-    let floats = [level, constant, strength, radius, 0.1, follow];
-    let mut words = [0u32; 12];
+    let follow = if role == Role::Reflections {
+        if crate::pipeline::builder_runs() { rt_reflection_limit() } else { fallback_reflection_limit() }
+    } else {
+        0.04
+    };
+    static SAID: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    let role_bit = 1 << role as u8;
+    if SAID.fetch_or(role_bit, Ordering::Relaxed) & role_bit == 0 {
+        tracing::info!(?role, size = ?views.size, level, constant, follow, floor = floor(), "recording a lighting pass");
+    }
+    let floats = [level, constant, strength, radius, 0.1, 0.45];
+    let mut words = [0u32; 13];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
     words[6] = views.size[0];
     words[7] = views.size[1];
-    words[8] = 0.04f32.to_bits();
+    words[8] = follow.to_bits();
     // Its sign says how the bound is taken ([`chroma`]).
     let limit = probe_limit();
     words[9] = if chroma() { limit } else { -limit }.to_bits();
     words[10] = air().to_bits();
     words[11] = floor().to_bits();
+    if role == Role::Reflections && !crate::pipeline::builder_runs() {
+        words[12] = reflection_ceiling().to_bits();
+    }
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -552,7 +605,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 12, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, words.len() as u32, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());

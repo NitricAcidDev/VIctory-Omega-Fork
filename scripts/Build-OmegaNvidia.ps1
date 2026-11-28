@@ -439,8 +439,12 @@ RWTexture2D<float3> reflected : register(u0);
 
 // Find nearby visible geometry in the reflected direction. Keep the ray
 // inside the current depth image and reject self hits and large depth jumps.
-bool reflected_surface(float3 start, float3 direction, float2 size, int2 source, float3 local_light, out float3 light) {
+bool reflected_surface(float3 start, float3 direction, float2 size, int2 source,
+                       float3 local_light, out float3 light, out float sky_visibility) {
     light = local_light;
+    sky_visibility = 0.0;
+    float previous_gap = 0.0;
+    float previous_distance = 0.0;
     float2 scale = float2(tan_y * size.x / size.y, -tan_y);
     float step_distance = max(0.12, start.z * 0.008);
     [loop]
@@ -452,12 +456,40 @@ bool reflected_surface(float3 start, float3 direction, float2 size, int2 source,
         int2 pixel = int2(uv * size);
         if (all(abs(pixel - source) <= 2)) continue;
         float hit_z = seen(pixel, size).z;
+        float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        // Fade visible sky near the screen edge where the ray can leave the depth image.
+        sky_visibility = hit_z >= 999.0 ? smoothstep(0.0, 0.05, edge) : 0.0;
         float gap = sample_position.z - hit_z;
-        if (gap <= max(0.035, hit_z * 0.004) || gap >= max(0.25, hit_z * 0.025)) continue;
+        float min_gap = max(0.035, hit_z * 0.004);
+        float max_gap = max(0.25, hit_z * 0.025);
+        // Refine a depth crossing once when the coarse march overshoots a ceiling or wall.
+        if (gap >= max_gap && previous_distance > 0.0 && previous_gap < 0.0) {
+            float distance = lerp(previous_distance, step_distance,
+                                  saturate((min_gap - previous_gap) / (gap - previous_gap)));
+            float3 candidate = start + direction * distance;
+            float2 candidate_uv = candidate.xy / (candidate.z * scale) * 0.5 + 0.5;
+            int2 candidate_pixel = int2(candidate_uv * size);
+            float candidate_depth = seen(candidate_pixel, size).z;
+            float candidate_gap = candidate.z - candidate_depth;
+            if (any(abs(candidate_pixel - source) > 2) && candidate_gap > 0.0
+                && candidate_gap < max(0.25, candidate_depth * 0.025)) {
+                uv = candidate_uv;
+                hit_z = candidate_depth;
+                gap = candidate_gap;
+                min_gap = 0.0;
+                max_gap = max(0.25, hit_z * 0.025);
+            }
+        }
+        previous_gap = gap;
+        previous_distance = hit_z < 999.0 ? step_distance : 0.0;
+        if (gap <= min_gap || gap >= max_gap) continue;
         uint2 cell = min(uint2(uv * float2(CX, CY)), uint2(CX - 1, CY - 1));
         uint slot = cell.y * CX + cell.x;
         float cell_z = cells[CELLS + 1 + slot].z;
-        if (abs(cell_z - hit_z) < max(0.20, hit_z * 0.02)) light = cells[slot].rgb;
+        if (abs(cell_z - hit_z) < max(0.20, hit_z * 0.02)) {
+            edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+            light = lerp(local_light, cells[slot].rgb, smoothstep(0.0, 0.05, edge));
+        }
         return true;
     }
     return false;
@@ -465,13 +497,16 @@ bool reflected_surface(float3 start, float3 direction, float2 size, int2 source,
 '@)
     $text.Replace($sample, @'
     float3 surface_light;
-    bool blocked = reflected_surface(c, ray, size, p, all, surface_light);
-    found = (blocked ? surface_light : lerp(found, cells[CELLS].rgb, 0.2)) * level;
+    float sky_visibility;
+    bool blocked = reflected_surface(c, ray, size, p, all, surface_light, sky_visibility);
+    // Only a ray that reaches visible sky gets the wide scene estimate.
+    // On misses, use the local directional light so a bright exterior cannot fill a room.
+    found = (blocked ? surface_light : lerp(found, cells[CELLS].rgb, 0.2 * sky_visibility)) * level;
 '@).Replace(
         '    reflected[at.xy] = lerp(found, bound_probe_color(was, found, 1.0), constant);',
         '    reflected[at.xy] = lerp(found, bound_probe_color(was, found, 1.0), blocked ? 0.0 : constant);'
     )
-} -Previous $ambientProbeColor
+} -Previous $ambientProbeColor -PreviousHash '4D80904F038F959F9E3E411FD21783DE0975D1BD04106EF7DBF908C18CC02A46'
 $omegaAudio = (Get-Content -LiteralPath (Join-Path $repo 'crates/victory-hle/src/modules/audio.rs') -Raw) -replace '\r\n', "`n"
 Update-NvidiaSource 'crates/victory-hle/src/modules/audio.rs' {
     param($text)

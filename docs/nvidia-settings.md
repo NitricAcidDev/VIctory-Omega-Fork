@@ -21,7 +21,7 @@ selected options again when you start from the launcher.
 | Game Keyboard | Enables Victory keyboard input and keyboard-to-controller emulation. Physical controllers and ScriptHook VI have separate input paths. |
 | DLSS Model | Chooses the DLSS preset requested from Streamline. |
 | Light Estimate | Sets the strength of Omega's estimate for indirect lighting. |
-| Reflection Estimate | Enables the reflection fallback. For opaque surfaces, it checks the visible scene depth along the reflection ray so nearby walls or ceilings can block the sky estimate. Geometry outside the view and transparent glass are outside this check. |
+| Reflection Estimate | Enables the reflection fallback. It uses visible scene depth along the reflection ray so a nearby wall or ceiling can block the sky estimate. Rays without confirmed sky or geometry use a local light estimate. Screen-space depth cannot provide off-screen geometry or separate glass from the opaque surface behind it. |
 | Fog Cap | Limits the lighting fed into the fog estimate. |
 | Ray Tracing | Enables the experimental acceleration-structure and ray tracing path. |
 | Water Light | On 32-lane hardware, **Off** skips both experimental tiled water passes, **Transmission Only** runs the base transmission pass, and **Both Passes** also runs tiled local lighting. Save and restart to compare the tiles. The launcher's checkbox selects Off or Both Passes. |

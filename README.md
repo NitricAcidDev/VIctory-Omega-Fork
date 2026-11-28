@@ -2,161 +2,111 @@
 
 <img src="crates/victory-gpu/assets/omega.png" alt="Victory Omega logo" width="160">
 
-## Run the codec_d Windows build
+Victory Omega is a fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer for running an Xbox Series title on Windows from files the user supplies.
 
-<<<<<<< Updated upstream
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
-=======
-Build the game and Omega Launcher together with `./Build-Victory.ps1`. The
-launcher build requires the .NET 10 SDK and runs on the .NET 10 Desktop
-Runtime. Open the generated **Omega Launcher** shortcut, browse for the folder
-containing `game_scarlett_master.exe`, select a profile, and launch the game.
-Use `-ShortcutDirectory` on the build script to place the shortcut elsewhere.
+This project is focused on NVIDIA hardware. Development and local testing currently target **NVIDIA GeForce RTX 50 Series GPUs**; the RTX 5060 Ti is the primary local test card. AMD hardware support is a future goal and is not a focus of current testing or compatibility claims.
 
-Both profiles present at up to 1080p. Series S is the profile that renders
-the 1080p frame. Series X still uses higher-resolution internal buffers.
+> **This repository contains no game files, code, or assets from the title.** You need your own complete, legally obtained copy.
 
-Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti is the local Windows test card. Open PowerShell in the build folder and point the launcher at your own complete Xbox dump.
->>>>>>> Stashed changes
+## Windows build
+
+Build the game and Omega Launcher together:
+
+```powershell
+.\Build-Victory.ps1
+```
+
+The launcher build requires the .NET 10 SDK and runs on the .NET 10 Desktop Runtime.
+
+Use `-ShortcutDirectory` to place the generated **Omega Launcher** shortcut elsewhere:
+
+```powershell
+.\Build-Victory.ps1 -ShortcutDirectory 'D:\Shortcuts'
+```
+
+Open the Omega Launcher, browse for the folder containing `game_scarlett_master.exe`, select a profile, and launch the game.
+
+You can also build the game directly:
+
+```powershell
+cargo build --release --locked -p victory
+```
+
+The release executable is written to `target\release\victory.exe`.
+
+## Requirements
+
+- Windows 10 or 11 x64
+- .NET 10 SDK and Desktop Runtime for the Omega Launcher
+- Rust using the pinned toolchain
+- MSVC C++ build tools and a Windows SDK
+- A Direct3D 12 GPU with Shader Model 6.6 and mesh shader support
+- A complete Xbox dump that you own
+
+NVIDIA RTX 50 Series hardware is the supported and tested direction. Other Direct3D 12 GPUs may work, but no compatibility level is claimed until tested.
+
+## Running
+
+Set the game directory and start the selected residency profile:
 
 ```powershell
 $env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
 .\Play-VIctory.cmd pareto-residency
 ```
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
-
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
-
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
-
-## The goal
-
-**A stable 30 fps or more without ray tracing, then as high a frame rate and as
-low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
-32 GB (later 16 GB) of RAM.
-
-The way there is **porting, not emulating**: patching the title's renderer so it
-behaves the way a PC renderer does, rather than having the layer watch and copy
-the console's shared memory every frame. Shaders are translated ahead of time
-into a versioned store that is kept between builds. Ray tracing stays optional
-and off by default. The picture comes after the frame rate: texture pop-in and
-lighting that is too bright or too dark when walking indoors are next in line.
-
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
-
-## Where it stands (2026-11-26)
-
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, the Series X profile, ray tracing off.
-
-| | |
-|---|---|
-| City street, renderer patches 1+2 on | about 53 ms a frame (about 19 fps) |
-| Same scene before the patches | 57-75 ms (13-17 fps) |
-| Shaders the title uses that translate | all of them (25,790 of 25,985; the rest are unused geometry shaders) |
-| Memory | about 35 GB of private memory: **64 GB of RAM recommended** for now |
-
-It started at 280 ms a frame in the same scenes three days earlier.
-
-### Renderer patches (off by default while they are tested)
-
-| Switch | What it does |
-|---|---|
-| `VICTORY_PORT_CONSTANTS=1` | The title's 174 MB constants heap is read by the card where the title writes it: no uploads, no fills |
-| `VICTORY_PORT_DESCRIPTORS=1` | The title's descriptor-table stores are patched (byte-checked) to report the slots they write, instead of a scan of ~600,000 slots a frame |
-
-What is known to be wrong:
-
-- Trees, signs and far objects flicker in the distance in some places.
-- Lighting is too bright or too dark after walking indoors, until the title has
-  run for a while; rooms with little direct light are too dark without `-RayTracing`.
-- Textures of what just came into view appear late while the title streams.
-- The first run of a new build stutters while the driver makes pipelines
-  (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
-
-## How to run it
-
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
+The launcher builds and reuses a local shader cache under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to keep the cache outside the checkout:
 
 ```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
+$env:VICTORY_CACHE_DIR = 'D:\VIctory\cache'
 ```
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-<<<<<<< Updated upstream
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
-=======
-something is wrong. Use `-Console series-x` for the Series X profile, which can render at 4K and shares the Series S texture residency and buffer allocation settings. Ray tracing is off by default. Screen-space reflections can use visible scene geometry. The renderer uses environment or probe data for misses. Use `-RayTracing` to test reflections that trace geometry outside the current view. Coverage varies by material and scene.
->>>>>>> Stashed changes
+Both Series S and Series X profiles are available. Series S renders the 1080p frame and is the default for NVIDIA residency testing. Series X uses higher-resolution internal buffers.
 
-Before the first run, ahead of time (both can be stopped and go on later):
+Ray tracing is optional and off by default. Use `-RayTracing` only when testing ray-traced indirect light or geometry tracing.
+
+## Development goals
+
+- Stable 30 fps or more without ray tracing
+- Higher frame rates and lower frame times on NVIDIA hardware
+- Reliable texture residency and lower memory pressure
+- Improved lighting, reflections, rendering coverage, and geometry stability
+- Ray tracing remains optional and is not required for the primary experience
+- AMD GPU support remains a future goal rather than a current testing priority
+
+The implementation approach is porting, not emulation: patching the title's renderer so it behaves more like a PC renderer instead of copying the console's shared memory every frame.
+
+## Diagnostics and shader cache
+
+The first run can take longer while shaders and pipelines are compiled. Prepare commonly used shaders ahead of time when needed:
 
 ```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+target\diag\victory.exe shaders <shader archives>
+target\diag\victory.exe warm --used
 ```
 
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
+Every `VICTORY_...` debugging switch is described near where it is read in the source.
 
-## What is different here
+Implementation details and development findings are documented in:
 
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+- [Architecture](docs/architecture.md)
+- [GPU replay and timing](docs/replay.md)
+- [Ray tracing work](docs/fork-ray-tracing.md)
+- [Findings](docs/findings.md)
 
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+The upstream and fork-specific notes remain available in [docs/README-fxceless.md](docs/README-fxceless.md).
 
 ## Credits
 
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+This repository combines other people's work with additional NVIDIA-focused development. Commit history records contributions taken from elsewhere.
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, and work by romainhedouin.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+- [VIctory](https://github.com/Marvisak/VIctory) and its contributors: loader, runtime services, Direct3D 12 back end, and shader recompiler
+- [fxceless/victory-fork](https://github.com/fxceless/victory-fork): the fork from which this work started
+- [DexNom/VIctory](https://github.com/DexNom/VIctory): ray tracing fixes and related rendering work
+- [FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)
+- Geckomacabre and cxy0072019-sketch: texture read-back work
+- [XCL](https://github.com/ivall/xcl): GPL-2.0-only reference implementation used for interoperability research
+- This fork's changes were made with Claude Code and GitHub Copilot
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE). The one file not covered by that license is identified in [docs/asset-policy.md](docs/asset-policy.md).

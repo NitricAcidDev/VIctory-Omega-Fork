@@ -21,11 +21,11 @@ selected options again when you start from the launcher.
 | Game Keyboard | Enables Victory keyboard input and keyboard-to-controller emulation. Physical controllers and ScriptHook VI have separate input paths. |
 | DLSS Model | Chooses the DLSS preset requested from Streamline. |
 | Light Estimate | Sets the strength of Omega's estimate for indirect lighting. |
-| Reflection Estimate | Enables the fallback for configured reflection passes. |
+| Reflection Estimate | Enables the reflection fallback. For opaque surfaces, it checks the visible scene depth along the reflection ray so nearby walls or ceilings can block the sky estimate. Geometry outside the view and transparent glass are outside this check. |
 | Fog Cap | Limits the lighting fed into the fog estimate. |
 | Ray Tracing | Enables the experimental acceleration-structure and ray tracing path. |
-| Water Light | Enables tiled volumetric water lighting. It can produce green or dark tiles on 32-lane NVIDIA hardware. |
-| Heat Haze and Decal Defrag | Skips both passes by default. **Decals Only** runs decal atlas defragmentation while keeping heat haze off. Save and restart to compare persistent black sign markings in the same scene. |
+| Water Light | On 32-lane hardware, **Off** skips both experimental tiled water passes, **Transmission Only** runs the base transmission pass, and **Both Passes** also runs tiled local lighting. Save and restart to compare the tiles. The launcher's checkbox selects Off or Both Passes. |
+| Heat Haze and Decal Defrag | **Left Out** skips both passes. Black road-sign markings have been reported in this mode. **Decals Only** runs decal atlas defragmentation while keeping heat haze off. Save and restart to compare the same sign. |
 | Early Depth Test | Allows supported translated pixel shaders to reject hidden pixels before shading. |
 | Skip Big Copy-Backs | Avoids some large GPU-to-CPU copies for write-combined memory. |
 | Soft Views | Keeps eligible resource views in Victory's bookkeeping and materializes them when needed, reducing waits while copying. |
@@ -40,3 +40,6 @@ selected options again when you start from the launcher.
 starts the game again. **Preload Shaders** restarts through the NVIDIA preloader.
 **Reset All to Play Defaults** clears the saved menu overrides. **Close**
 returns to the game.
+
+Water Light affects shading. Water appearing inland with splashes is a
+separate shoreline issue.

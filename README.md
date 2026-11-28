@@ -56,7 +56,7 @@ For NVIDIA shader precompilation with the selected launch profile, add `-Preload
 
 **Unified tuning** on Home lets the NVIDIA runner use up to 1 GiB of Resizable BAR upload memory and six draw-recording workers. It is off by default and unavailable with Low-memory mode. PowerShell users can pass `-UnifiedTuning` to `play.ps1`. To try whole-program optimization, add `-OptimizedBuild` to `Build-OmegaNvidia.ps1`. This build takes longer. See the [comparison notes](docs/performance-nvidia.md).
 
-**Water Light** controls the experimental tiled water lighting pass. It starts off in Omega Launcher because the pass can cause dark or green tiles on NVIDIA. Use it to compare the same shoreline with both settings. See the [NVIDIA settings reference](docs/nvidia-settings.md) for the other F1 options.
+**Water Light** starts off in Omega Launcher because the experimental tiled passes can cause dark or green blocks on NVIDIA. The F1 menu also offers **Transmission Only** to compare the base water shading with tiled local lighting disabled. Save and restart to apply it. [NVIDIA settings reference](docs/nvidia-settings.md)
 
 ### ScriptHook VI trainer
 

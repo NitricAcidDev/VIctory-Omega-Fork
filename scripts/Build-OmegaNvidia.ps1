@@ -158,7 +158,7 @@ $fullscreenMenu = {
     /// Records the copy of the box onto
 '@)
 }
-Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+$omegaGraphicsMenu = {
     param($text)
     $text = & $fullscreenMenu $text
     $text = $text.Replace('    // The layer''s switches.', @'
@@ -167,7 +167,14 @@ Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
 '@)
     $text.Replace('("02384a60fda6f2d0,731a39171b568298", "LEFT OUT"), ("", "RUN (SLOWER, SMEARS)")',
         '("02384a60fda6f2d0,731a39171b568298", "LEFT OUT"), ("731a39171b568298", "DECALS ONLY"), ("", "RUN BOTH")')
-} -Previous $fullscreenMenu -PreviousHash @(
+}
+Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
+    param($text)
+    $text = & $omegaGraphicsMenu $text
+    $water = 'values: &[("", "OFF (NO DARK BLOCKS)"), ("1", "ON (GREEN, DARK BLOCKS)")]'
+    if (!$text.Contains($water)) { throw 'Could not find the NVIDIA Water Light setting.' }
+    $text.Replace($water, 'values: &[("", "OFF"), ("base", "TRANSMISSION ONLY"), ("1", "BOTH PASSES")]')
+} -Previous $omegaGraphicsMenu -PreviousHash @(
     '99E2B322E28E3C6959631F2FD075FF0D4F238AEE183772168BE3D6926403278D',
     '91A2717E47DD1C717E6FF134181A7087BAE6A32F0FCA3035E58DE17D79A544DB',
     'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
@@ -211,7 +218,7 @@ Update-NvidiaSource 'crates/victory-gpu/src/texture.rs' {
 '@
     $text.Remove($at, $original.Length).Insert($at, $retry)
 }
-Update-NvidiaSource 'crates/victory-gpu/src/pipeline/make.rs' {
+$pipelineRecovery = {
     param($text)
     $make = '            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());'
     if (!$text.Contains($make)) { throw 'Could not find the NVIDIA pipeline build call.' }
@@ -226,6 +233,27 @@ Update-NvidiaSource 'crates/victory-gpu/src/pipeline/make.rs' {
             });
 '@)
 }
+Update-NvidiaSource 'crates/victory-gpu/src/pipeline/make.rs' {
+    param($text)
+    $text = & $pipelineRecovery $text
+    $water = '(?s)fn water_light_left_out\(shaders: &\[Arc<Shader>\]\) -> bool \{.*?\n\}'
+    if ($text -notmatch $water) { throw 'Could not find the NVIDIA tiled water-light policy.' }
+    $text = $text -replace $water, @'
+fn water_light_left_out(shaders: &[Arc<Shader>]) -> bool {
+    if victory_shader::emit::host_settings()[0] != 32 {
+        return false;
+    }
+    static PASSES: OnceLock<usize> = OnceLock::new();
+    let passes = *PASSES.get_or_init(|| match std::env::var("VICTORY_WATER_LIGHT").as_deref() {
+        Ok("1") => WATER_LIGHT.len(),
+        Ok("base") => 1,
+        _ => 0,
+    });
+    shaders.iter().any(|s| WATER_LIGHT[passes..].contains(&s.hash.as_str()))
+}
+'@
+    $text.Replace('dark blocks; VICTORY_WATER_LIGHT=1 runs it', 'see VICTORY_WATER_LIGHT')
+} -Previous $pipelineRecovery
 Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
     param($text)
     $text = $text.Replace(
@@ -310,7 +338,7 @@ Update-NvidiaSource 'crates/victory-gpu/src/queue.rs' {
     if (!$text.Contains($present)) { throw 'Could not find the NVIDIA present hook.' }
     $text.Replace($present, "$present`n    #[cfg(windows)]`n    crate::frame::note_present(crate::draw::drawn());")
 }
-Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
+$ambientProbeColor = {
     param($text)
     $luma = 'static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);'
     $text = $text.Replace($luma, $luma + "`n" + @'
@@ -337,6 +365,52 @@ float3 bound_probe_color(float3 sample, float3 local_light, float gain) {
     $text = $text -replace '(?s)    // Magenta/violet garbage the probes.*?(?=    // What the program left counts)', ''
     $text.Replace('    float3 now = max(was, found);', '    float3 now = max(bound_probe_color(was, found, most), found);')
 }
+Update-NvidiaSource 'crates/victory-gpu/src/ambient.rs' {
+    param($text)
+    $text = & $ambientProbeColor $text
+    $anchor = 'RWTexture2D<float3> reflected : register(u0);'
+    $sample = '    found = lerp(found, cells[CELLS].rgb, 0.2) * level;'
+    if (!$text.Contains($anchor) -or !$text.Contains($sample)) {
+        throw 'Could not find the NVIDIA opaque reflection fallback.'
+    }
+    $text = $text.Replace($anchor, @'
+RWTexture2D<float3> reflected : register(u0);
+
+// Find nearby visible geometry in the reflected direction. Keep the ray
+// inside the current depth image and reject self hits and large depth jumps.
+bool reflected_surface(float3 start, float3 direction, float2 size, int2 source, float3 local_light, out float3 light) {
+    light = local_light;
+    float2 scale = float2(tan_y * size.x / size.y, -tan_y);
+    float step_distance = max(0.12, start.z * 0.008);
+    [loop]
+    for (uint i = 0; i < 7; i++, step_distance *= 1.85) {
+        float3 sample_position = start + direction * step_distance;
+        if (sample_position.z <= near) break;
+        float2 uv = sample_position.xy / (sample_position.z * scale) * 0.5 + 0.5;
+        if (any(uv <= 0.0) || any(uv >= 1.0)) break;
+        int2 pixel = int2(uv * size);
+        if (all(abs(pixel - source) <= 2)) continue;
+        float hit_z = seen(pixel, size).z;
+        float gap = sample_position.z - hit_z;
+        if (gap <= max(0.035, hit_z * 0.004) || gap >= max(0.25, hit_z * 0.025)) continue;
+        uint2 cell = min(uint2(uv * float2(CX, CY)), uint2(CX - 1, CY - 1));
+        uint slot = cell.y * CX + cell.x;
+        float cell_z = cells[CELLS + 1 + slot].z;
+        if (abs(cell_z - hit_z) < max(0.20, hit_z * 0.02)) light = cells[slot].rgb;
+        return true;
+    }
+    return false;
+}
+'@)
+    $text.Replace($sample, @'
+    float3 surface_light;
+    bool blocked = reflected_surface(c, ray, size, p, all, surface_light);
+    found = (blocked ? surface_light : lerp(found, cells[CELLS].rgb, 0.2)) * level;
+'@).Replace(
+        '    reflected[at.xy] = lerp(found, bound_probe_color(was, found, 1.0), constant);',
+        '    reflected[at.xy] = lerp(found, bound_probe_color(was, found, 1.0), blocked ? 0.0 : constant);'
+    )
+} -Previous $ambientProbeColor
 $omegaAudio = (Get-Content -LiteralPath (Join-Path $repo 'crates/victory-hle/src/modules/audio.rs') -Raw) -replace '\r\n', "`n"
 Update-NvidiaSource 'crates/victory-hle/src/modules/audio.rs' {
     param($text)

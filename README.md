@@ -7,7 +7,7 @@
 Victory Omega targets NVIDIA GeForce RTX 50 Series. The RTX 5060 Ti 16 GB is the local Windows test card. To build, install Git, Rust via rustup, Visual Studio Build Tools with **Desktop development with C++** and a Windows SDK, and the .NET 10 SDK. Run these commands in PowerShell:
 
 ```powershell
-git clone --branch primary https://github.com/NitricAcidDev/VIctory-Omega-Fork.git
+git clone --branch Main https://github.com/NitricAcidDev/VIctory-Omega-Fork.git
 Set-Location VIctory-Omega-Fork
 .\Build-Victory.ps1 -Diagnostics
 Start-Process '.\Omega Launcher.lnk'

@@ -3163,7 +3163,7 @@ impl State {
     fn finish_ambient_dispatch(&mut self, list: &HostList, p: &HostPipeline, indirect: bool) {
         if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
             && (!indirect || role == crate::ambient::Role::Reflections)
-            && crate::ambient::on()
+            && crate::ambient::on(role)
             && self.ambient(list, p, role)
         {
             self.host_pipeline = 0;

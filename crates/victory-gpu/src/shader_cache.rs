@@ -201,7 +201,10 @@ fn translate_listed(c: &[u8]) -> Result<HostShader, String> {
 /// form: fxceless #799); `all` adds those five. For every program the form once lost the card (`emit`).
 /// `VICTORY_WAVE_WIDE_ONLY`: a list of hashes in place of these, `none` for
 /// none.
-const WAVE_WIDE_DEFAULT: [&str; 15] = [
+const WAVE_WIDE_DEFAULT: [&str; 16] = [
+    // sr_tracing: CS_Tiling_Generate_Opaque. Preserve the console wave
+    // when building the tiles used by the bottom of the reflection image.
+    "2cc4c197ee29e291",
     // shadowmask: CS_GenerateShadowMasksHairOnly_SampleHairScreenSpace, CS_GenerateShadowMasks_SampleHairScreenSpace
     "888af37a584acf98",
     "2889c21328c69e58",
@@ -221,7 +224,9 @@ const WAVE_WIDE_DEFAULT: [&str; 15] = [
     "a09f0c1fae2b5ca3",
     "f38f83439083b9ef",
 ];
-/// water_shading: CS_TransmissionVolumetrics* (`VICTORY_WAVE_WIDE_ONLY=all`).
+/// Non-tiled water transmission shaders. The tiled passes can draw dark blocks.
+const WAVE_WIDE_WATER_BASE: [&str; 3] = ["926c46bab3b86bd6", "a10179ab7eda0dc3", "6871d6e4b3ac9a10"];
+/// All water transmission shaders (`VICTORY_WAVE_WIDE_ONLY=all`).
 const WAVE_WIDE_WATER: [&str; 5] = ["926c46bab3b86bd6", "6f225b641c5b0708", "5dc3b25986622949", "a10179ab7eda0dc3", "6871d6e4b3ac9a10"];
 
 fn wave_wide_list() -> &'static [String] {
@@ -232,6 +237,7 @@ fn wave_wide_list() -> &'static [String] {
 fn wave_wide_of(value: Option<&str>) -> Vec<String> {
     match value.map(str::trim) {
         None | Some("") => WAVE_WIDE_DEFAULT.iter().map(|h| h.to_string()).collect(),
+        Some("water-base") => WAVE_WIDE_DEFAULT.iter().chain(&WAVE_WIDE_WATER_BASE).map(|h| h.to_string()).collect(),
         Some("all") => WAVE_WIDE_DEFAULT.iter().chain(&WAVE_WIDE_WATER).map(|h| h.to_string()).collect(),
         Some(v) => v.split(',').map(|h| h.trim().to_lowercase()).filter(|h| h.len() >= 8 && h != "none").collect(),
     }
@@ -519,12 +525,15 @@ mod tests {
     #[test]
     fn the_wave_wide_list_and_its_switch() {
         let default = wave_wide_of(None);
-        assert_eq!(default.len(), 15);
+        assert_eq!(default.len(), WAVE_WIDE_DEFAULT.len());
         // The hair's shadow masks are in it; the water's light is not.
         assert!(default.iter().any(|h| h == "888af37a584acf98") && default.iter().any(|h| h == "2889c21328c69e58"));
         assert!(!default.iter().any(|h| WAVE_WIDE_WATER.contains(&h.as_str())));
         assert_eq!(wave_wide_of(Some(" ")), default);
-        assert_eq!(wave_wide_of(Some("all")).len(), 20);
+        let water_base = wave_wide_of(Some("water-base"));
+        assert!(water_base.starts_with(&default));
+        assert_eq!(&water_base[default.len()..], ["926c46bab3b86bd6", "a10179ab7eda0dc3", "6871d6e4b3ac9a10"]);
+        assert_eq!(wave_wide_of(Some("all")).len(), default.len() + WAVE_WIDE_WATER.len());
         assert!(wave_wide_of(Some("none")).is_empty());
         assert_eq!(wave_wide_of(Some("888AF37A584ACF98, x")), ["888af37a584acf98"]);
     }

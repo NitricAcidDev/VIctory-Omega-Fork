@@ -10,6 +10,7 @@ param(
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s',
     [switch]$Safe,
     [switch]$RayTracing,
+    [switch]$WaterWave64,
     [ValidateSet('diag', 'release')][string]$Build = 'release',
     [hashtable]$More = @{}
 )
@@ -32,6 +33,7 @@ if ($RayTracing) {
 } elseif ($Console -eq 'series-x') {
     $settings.VICTORY_AMBIENT_FLOOR = '0.09'
 }
+if ($WaterWave64) { $settings.VICTORY_WAVE_WIDE_ONLY = 'water-base' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"

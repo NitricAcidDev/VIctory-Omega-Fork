@@ -26,7 +26,8 @@ internal sealed class Launcher : Form
     private readonly string? repo;
     private readonly TextBox folder = new();
     private readonly ComboBox profile = new();
-    private readonly CheckBox rays = new();
+    private readonly CheckBox rays = new() { Dock = DockStyle.Fill, AutoEllipsis = true };
+    private readonly CheckBox waterWave64 = new() { Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly Label status = new();
     private readonly Button play = new();
     private readonly Image logo;
@@ -67,6 +68,7 @@ internal sealed class Launcher : Form
         folder.Text = saved.Folder ?? FindLocalGame() ?? "";
         profile.SelectedIndex = saved.SeriesX ? 1 : 0;
         rays.Checked = saved.RayTracing;
+        waterWave64.Checked = saved.WaterWave64;
         folder.TextChanged += (_, _) => RefreshStatus();
         profile.SelectedIndexChanged += (_, _) => RefreshStatus();
         rays.CheckedChanged += (_, _) => RefreshStatus();
@@ -142,8 +144,20 @@ internal sealed class Launcher : Form
         card.Controls.Add(profile, 0, 2);
         rays.Text = "Ray tracing";
         rays.AccessibleDescription = "Experimental. Leave off if you see rendering artifacts.";
-        rays.Dock = DockStyle.Fill;
-        card.Controls.Add(rays, 1, 2);
+        waterWave64.Text = "Water Wave64";
+        waterWave64.AccessibleDescription = "Experimental paired-wave translation for non-tiled water light.";
+        card.ColumnStyles[0].Width = 52;
+        card.ColumnStyles[1].SizeType = SizeType.Percent;
+        card.ColumnStyles[1].Width = 48;
+        var toggles = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty
+        };
+        toggles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        toggles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        toggles.Controls.Add(rays, 0, 0);
+        toggles.Controls.Add(waterWave64, 1, 0);
+        card.Controls.Add(toggles, 1, 2);
         return card;
     }
 
@@ -153,6 +167,7 @@ internal sealed class Launcher : Form
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 142));
         status.Dock = DockStyle.Fill;
+        status.AutoEllipsis = true;
         status.ForeColor = Muted;
         status.TextAlign = ContentAlignment.MiddleLeft;
         footer.Controls.Add(status, 0, 0);
@@ -246,7 +261,7 @@ internal sealed class Launcher : Form
         try
         {
             Directory.CreateDirectory(StateDir);
-            var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked);
+            var selection = new Settings(Path.GetDirectoryName(exe), profile.SelectedIndex == 1, rays.Checked, waterWave64.Checked);
             File.WriteAllText(StateFile, JsonSerializer.Serialize(selection));
             var start = new ProcessStartInfo("powershell.exe")
             {
@@ -260,6 +275,8 @@ internal sealed class Launcher : Form
                 start.ArgumentList.Add(argument);
             if (selection.RayTracing)
                 start.ArgumentList.Add("-RayTracing");
+            if (selection.WaterWave64)
+                start.ArgumentList.Add("-WaterWave64");
             UseLocalData(start);
             TrackRun(start);
         }
@@ -346,5 +363,5 @@ internal sealed class Launcher : Form
         base.Dispose(disposing);
     }
 
-    private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false);
+    private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false, bool WaterWave64 = false);
 }

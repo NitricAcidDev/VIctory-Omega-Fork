@@ -86,6 +86,8 @@ Open **Omega Launcher** to select your game folder and graphics profile. To laun
 
 Series S is the default and targets 1080p. Pass `-Console series-x` for Series X, `-RayTracing` to test ray tracing, or `-Build diag` to use a diagnostics build. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout.
 
+**Water Wave64** is an opt-in NVIDIA experiment, also available as **-WaterWave64** in PowerShell. It adds three non-tiled water transmission shaders to the paired-wave translation list. Compare the same daylight shoreline with the setting off and on. Each mode can compile its own shaders on first use.
+
 ## Credits
 
 This repository combines other people's work with additional NVIDIA-focused development. Commit history records contributions taken from elsewhere.

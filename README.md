@@ -8,6 +8,37 @@ This project is focused on NVIDIA hardware. Development and local testing curren
 
 > **This repository contains no game files, code, or assets from the title.** You need your own complete, legally obtained copy.
 
+## Development goals
+
+- Stable 30 fps or more without ray tracing
+- Higher frame rates and lower frame times on NVIDIA hardware
+- Reliable texture residency and lower memory pressure
+- Improved lighting, reflections, rendering coverage, and geometry stability
+- Ray tracing remains optional and is not required for the primary experience
+- AMD GPU support remains a future goal rather than a current testing priority
+
+The implementation approach is porting, not emulation: patching the title's renderer so it behaves more like a PC renderer instead of copying the console's shared memory every frame.
+
+## Diagnostics and shader cache
+
+The first run can take longer while shaders and pipelines are compiled. Prepare commonly used shaders ahead of time when needed:
+
+```powershell
+target\diag\victory.exe shaders <shader archives>
+target\diag\victory.exe warm --used
+```
+
+Every `VICTORY_...` debugging switch is described near where it is read in the source.
+
+Implementation details and development findings are documented in:
+
+- [Architecture](docs/architecture.md)
+- [GPU replay and timing](docs/replay.md)
+- [Ray tracing work](docs/fork-ray-tracing.md)
+- [Findings](docs/findings.md)
+
+The upstream and fork-specific notes remain available in [docs/README-fxceless.md](docs/README-fxceless.md).
+
 ## Windows build
 
 Build the game and Omega Launcher together:
@@ -63,37 +94,6 @@ $env:VICTORY_CACHE_DIR = 'D:\VIctory\cache'
 Both Series S and Series X profiles are available. Series S renders the 1080p frame and is the default for NVIDIA residency testing. Series X uses higher-resolution internal buffers.
 
 Ray tracing is optional and off by default. Use `-RayTracing` only when testing ray-traced indirect light or geometry tracing.
-
-## Development goals
-
-- Stable 30 fps or more without ray tracing
-- Higher frame rates and lower frame times on NVIDIA hardware
-- Reliable texture residency and lower memory pressure
-- Improved lighting, reflections, rendering coverage, and geometry stability
-- Ray tracing remains optional and is not required for the primary experience
-- AMD GPU support remains a future goal rather than a current testing priority
-
-The implementation approach is porting, not emulation: patching the title's renderer so it behaves more like a PC renderer instead of copying the console's shared memory every frame.
-
-## Diagnostics and shader cache
-
-The first run can take longer while shaders and pipelines are compiled. Prepare commonly used shaders ahead of time when needed:
-
-```powershell
-target\diag\victory.exe shaders <shader archives>
-target\diag\victory.exe warm --used
-```
-
-Every `VICTORY_...` debugging switch is described near where it is read in the source.
-
-Implementation details and development findings are documented in:
-
-- [Architecture](docs/architecture.md)
-- [GPU replay and timing](docs/replay.md)
-- [Ray tracing work](docs/fork-ray-tracing.md)
-- [Findings](docs/findings.md)
-
-The upstream and fork-specific notes remain available in [docs/README-fxceless.md](docs/README-fxceless.md).
 
 ## Credits
 

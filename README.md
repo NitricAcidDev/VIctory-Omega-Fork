@@ -78,22 +78,13 @@ NVIDIA RTX 50 Series hardware is the supported and tested direction. Other Direc
 
 ## Running
 
-Set the game directory and start the selected residency profile:
+Open **Omega Launcher** to select your game folder and graphics profile. To launch directly from PowerShell after building:
 
 ```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
-.\Play-VIctory.cmd pareto-residency
+.\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
 ```
 
-The launcher builds and reuses a local shader cache under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to keep the cache outside the checkout:
-
-```powershell
-$env:VICTORY_CACHE_DIR = 'D:\VIctory\cache'
-```
-
-Both Series S and Series X profiles are available. Series S renders the 1080p frame and is the default for NVIDIA residency testing. Series X uses higher-resolution internal buffers.
-
-Ray tracing is optional and off by default. Use `-RayTracing` only when testing ray-traced indirect light or geometry tracing.
+Series S is the default and targets 1080p. Pass `-Console series-x` for Series X, `-RayTracing` to test ray tracing, or `-Build diag` to use a diagnostics build. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout.
 
 ## Credits
 

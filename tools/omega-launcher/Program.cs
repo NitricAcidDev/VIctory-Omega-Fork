@@ -269,7 +269,7 @@ internal sealed class Launcher : Form
             (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing"), (waterLight, "Water Light"),
             (waterWave64, "Water Wave64") };
         waterLight.AccessibleDescription = "Enables experimental NVIDIA water lighting. May cause dark or green water tiles.";
-        waterWave64.AccessibleDescription = "Tests paired-wave translation for non-tiled water lighting in the built-in runner.";
+        waterWave64.AccessibleDescription = "Tests paired-wave translation for non-tiled water lighting.";
         for (int index = 0; index < choices.Length; index++)
         {
             var (check, label) = choices[index];
@@ -493,7 +493,7 @@ internal sealed class Launcher : Form
     private void RefreshStatus()
     {
         waterLight.Enabled = nvidia.Checked;
-        waterWave64.Enabled = !nvidia.Checked;
+
         unifiedTuning.Enabled = nvidia.Checked && !memory.Checked;
         string? game = GamePath();
         string? gameDirectory = game is null ? null : Path.GetDirectoryName(game);
@@ -562,7 +562,7 @@ internal sealed class Launcher : Form
                 start.ArgumentList.Add("-FrameGeneration");
                 start.ArgumentList.Add(selection.FrameGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
-            else if (selection.WaterWave64)
+            if (selection.WaterWave64)
                 start.ArgumentList.Add("-WaterWave64");
             if (selection.RayTracing)
                 start.ArgumentList.Add("-RayTracing");

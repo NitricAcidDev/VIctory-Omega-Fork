@@ -15,7 +15,7 @@ Start-Process '.\Omega Launcher.lnk'
 
 In Omega Launcher, browse to your own complete Xbox game folder and select **Launch game**. The default profile is Series S at 1080p with ray tracing off. F3 toggles the performance overlay in a diagnostics build. Alt+Enter toggles borderless fullscreen. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
 
-The launcher saves your Home and Mods settings when you launch or close it. The in-game F1 menu has its own **Save for Next Start** action.
+The launcher saves your Home and Mods settings when you launch or close it. The in-game F1 menu saves changes as you make them. Settings that require a restart take effect on the next start.
 
 `Build-Victory.ps1 -Diagnostics` builds the game in `target\diag` and the launcher in `target\omega-launcher`. Omit `-Diagnostics` for a release build. To put the shortcut in an existing Victory folder, add `-ShortcutDirectory 'E:\Victory'`.
 
@@ -44,7 +44,7 @@ Build the optional NVIDIA runner and install Streamline once:
 & "$env:LOCALAPPDATA\victory\nvidia-runner\omega-options-v1\victory.exe" get-dlss
 ```
 
-Reopen Omega Launcher, check **Use NVIDIA runner**, and select **Launch game**. You can also launch it directly with the command below. The build script uses the pinned release source. [VIctory-NVIDIA releases](https://github.com/trustno1-coder/VIctory-NVIDIA/releases)
+Reopen Omega Launcher, check **Use NVIDIA runner**, and select **Launch game**. You can also launch it directly with the command below. The build script uses a pinned upstream commit and keeps each revision in a separate Local AppData source checkout. [VIctory-NVIDIA releases](https://github.com/trustno1-coder/VIctory-NVIDIA/releases)
 
 ```powershell
 .\scripts\play.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Console series-s -Nvidia -Dlss quality -FrameGeneration 0
@@ -58,7 +58,7 @@ For NVIDIA shader precompilation with the selected launch profile, add `-Preload
 
 **Water Light** starts off in Omega Launcher because the experimental tiled passes can cause dark or green blocks on NVIDIA. The F1 menu also offers **Transmission Only** to compare the base water shading with tiled local lighting disabled. Save and restart to apply it. [NVIDIA settings reference](docs/nvidia-settings.md)
 
-**Water Wave64** on Home is an opt-in experiment in the built-in runner. Clear **Use NVIDIA runner** to select it, or pass `-WaterWave64` to `play.ps1`. It tests paired-wave translation on three non-tiled water shaders. Compare the same daylight shoreline with it off and on.
+**Water Wave64** on Home is an opt-in experiment. PowerShell users can pass `-WaterWave64` to `play.ps1`. It opts three non-tiled water transmission shaders into paired-wave translation on 32-lane GPUs. It works with either renderer, and the NVIDIA F1 menu can change it for the next start. Compare the same daylight shoreline with it off and on.
 
 ### ScriptHook VI trainer
 

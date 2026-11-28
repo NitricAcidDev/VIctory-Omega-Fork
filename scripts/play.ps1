@@ -35,9 +35,7 @@ param(
 if (!$Nvidia -and ($WaterLight -or $PreloadShaders -or $UnifiedTuning -or $Trainer)) {
     throw 'Water Light, shader preload, Unified tuning and the trainer require -Nvidia.'
 }
-if ($Nvidia -and $WaterWave64) {
-    throw 'The Water Wave64 experiment requires the built-in runner.'
-}
+
 if ($UnifiedTuning -and $LowMemory) {
     throw 'Unified tuning adds a GPU memory budget. Turn off Low-memory mode to use it.'
 }
@@ -148,17 +146,16 @@ if ($Nvidia) {
         VICTORY_WINDOW_KB = $(if ($LowMemory) { '2048' } else { '' })
         VICTORY_PANEL = $(if ($PerformanceLog) { '1' } else { '0' })
         VICTORY_OMEGA_AUDIO_TRACE = $(if ($AudioTrace) { '1' } else { '' })
-        VICTORY_WARMUP_RESTART = '0'
+        VICTORY_OMEGA_WATER_WAVE64 = $(if ($WaterWave64) { '1' } else { '' })
         VICTORY_TEXTURE_CATCHUP = '1'
     }
-    if ($UnifiedTuning) {
-        # VIctoryUnified's measured settings. Keep Omega's VRAM-scaled
-        # card buffer limits and NVIDIA upscaler. --set can override either value.
-        $options.VICTORY_WINDOWS_BAR_MB = '1024'
-        $options.VICTORY_THIN_THREADS = '6'
-    }
+
     $env:VICTORY_OMEGA_LAUNCH = ($options.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join [char]10
-    $launch = @('play', $Exe)
+    $launch = @('play', $Exe, '--set', 'VICTORY_WARMUP_RESTART=0')
+    if ($UnifiedTuning) {
+        # Upstream carries command-line switches across an F1 restart.
+        $launch += '--set', 'VICTORY_WINDOWS_BAR_MB=1024', '--set', 'VICTORY_THIN_THREADS=6'
+    }
     if ($PreloadShaders) { $launch += '--preload' }
     if ($Trainer) { $launch += '--set', 'VICTORY_OMEGA_TRAINER=1' }
     foreach ($key in $More.Keys) { $launch += '--set', "$key=$($More[$key])" }

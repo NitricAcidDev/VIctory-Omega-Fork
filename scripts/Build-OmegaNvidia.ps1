@@ -1,6 +1,6 @@
 # Build the NVIDIA runner with Omega window branding. The checkout and binary stay outside the repo.
 param(
-    [string]$SourceDir = (Join-Path $env:LOCALAPPDATA 'victory/nvidia-source'),
+    [string]$SourceDir,
     [string]$TrainerGameDirectory,
     [switch]$OptimizedBuild
 )
@@ -8,15 +8,19 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $sourceUrl = 'https://github.com/trustno1-coder/VIctory-NVIDIA.git'
-$release = 'v2026.11.27.3'
-$commit = '0cef07e9d766df48f0e95f13ce3bbbe2290fe9d3'
+$commit = '8fc22547c81a0ae6e2e9d0669f776854016fb8a1'
+if (!$SourceDir) {
+    $SourceDir = Join-Path $env:LOCALAPPDATA ("victory/nvidia-source-" + $commit.Substring(0, 8))
+}
 
 if (!(Test-Path -LiteralPath (Join-Path $SourceDir '.git'))) {
-    git clone --depth 1 --branch $release -- $sourceUrl $SourceDir
+    git clone --no-checkout --no-tags --filter=blob:none -- $sourceUrl $SourceDir
     if ($LASTEXITCODE) { throw 'Could not clone the pinned NVIDIA source.' }
+    git -C $SourceDir switch --detach $commit
+    if ($LASTEXITCODE) { throw 'Could not check out the pinned NVIDIA source.' }
 }
 $revision = git -C $SourceDir rev-parse HEAD
-if ($LASTEXITCODE -or $revision -ne $commit) { throw 'Expected the pinned VIctory-NVIDIA release checkout.' }
+if ($LASTEXITCODE -or $revision -ne $commit) { throw 'Expected the pinned VIctory-NVIDIA commit. Use a fresh source directory for this version.' }
 if (!(Test-Path -LiteralPath (Join-Path $SourceDir 'Cargo.toml'))) {
     git -C $SourceDir switch --detach $commit
     if ($LASTEXITCODE) { throw 'Could not check out the NVIDIA source.' }
@@ -171,9 +175,14 @@ $omegaGraphicsMenu = {
 Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     param($text)
     $text = & $omegaGraphicsMenu $text
-    $water = 'values: &[("", "OFF (NO DARK BLOCKS)"), ("1", "ON (GREEN, DARK BLOCKS)")]'
+    $water = 'label: "WATER LIGHT", values: &[("", "ON"), ("0", "OFF")]'
     if (!$text.Contains($water)) { throw 'Could not find the NVIDIA Water Light setting.' }
-    $text.Replace($water, 'values: &[("", "OFF"), ("base", "TRANSMISSION ONLY"), ("1", "BOTH PASSES")]')
+    $text = $text -replace '(?m)^    // On unless "0":.*\n    // and both start it on,.*\n', ''
+    $text.Replace($water, 'label: "WATER LIGHT", values: &[("", "OFF"), ("base", "TRANSMISSION ONLY"), ("1", "BOTH PASSES")]').Replace(
+        '    Item { var: "VICTORY_LEAVE_OUT",', @'
+    Item { var: "VICTORY_OMEGA_WATER_WAVE64", label: "WATER WAVE64", values: UNSET_ON, live: false },
+    Item { var: "VICTORY_LEAVE_OUT",
+'@)
 } -Previous $omegaGraphicsMenu -PreviousHash @(
     '99E2B322E28E3C6959631F2FD075FF0D4F238AEE183772168BE3D6926403278D',
     '91A2717E47DD1C717E6FF134181A7087BAE6A32F0FCA3035E58DE17D79A544DB',
@@ -218,24 +227,8 @@ Update-NvidiaSource 'crates/victory-gpu/src/texture.rs' {
 '@
     $text.Remove($at, $original.Length).Insert($at, $retry)
 }
-$pipelineRecovery = {
-    param($text)
-    $make = '            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());'
-    if (!$text.Contains($make)) { throw 'Could not find the NVIDIA pipeline build call.' }
-    # fxceless #1353, brought to this build via VIctoryUnified's progress notes.
-    $text.Replace($make, @'
-            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                HostPipeline::new(&self.shaders, self.graphics.as_deref())
-            }))
-            .unwrap_or_else(|_| {
-                tracing::warn!(pipeline = %self.key, "host pipeline build panicked");
-                None
-            });
-'@)
-}
 Update-NvidiaSource 'crates/victory-gpu/src/pipeline/make.rs' {
     param($text)
-    $text = & $pipelineRecovery $text
     $water = '(?s)fn water_light_left_out\(shaders: &\[Arc<Shader>\]\) -> bool \{.*?\n\}'
     if ($text -notmatch $water) { throw 'Could not find the NVIDIA tiled water-light policy.' }
     $text = $text -replace $water, @'
@@ -252,8 +245,53 @@ fn water_light_left_out(shaders: &[Arc<Shader>]) -> bool {
     shaders.iter().any(|s| WATER_LIGHT[passes..].contains(&s.hash.as_str()))
 }
 '@
-    $text.Replace('dark blocks; VICTORY_WATER_LIGHT=1 runs it', 'see VICTORY_WATER_LIGHT')
-} -Previous $pipelineRecovery
+    $text = $text -replace '(?m)^/// .*VICTORY_WATER_LIGHT=0.*$', '/// VICTORY_WATER_LIGHT=base enables transmission only, and 1 enables both.'
+    $text.Replace('the water''s tiled light on a host of 32-lane waves, left out (VICTORY_WATER_LIGHT=0)', 'the water''s tiled light on a host of 32-lane waves, left out (see VICTORY_WATER_LIGHT)')
+}
+Update-NvidiaSource 'crates/victory-shader/src/emit/mod.rs' {
+    param($text)
+    $anchor = "pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {"
+    $policy = 'let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");'
+    if (!$text.Contains($anchor) -or !$text.Contains($policy)) { throw 'Could not find the NVIDIA Wave64 translation policy.' }
+    $text.Replace($policy, 'let wide_on = wide_option.as_ref().map_or(scene_kernel || OMEGA_WATER_WAVE64.get(), |v| v == "1");').Replace(
+        '/// Translates the vertex, pixel, compute or mesh program of a console', @'
+thread_local! {
+    static OMEGA_WATER_WAVE64: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Allow the existing paired-wave lowering for one selected translation.
+pub fn translate_water_wave64(container: &[u8]) -> Result<HostShader, ShaderError> {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OMEGA_WATER_WAVE64.set(self.0);
+        }
+    }
+    let _reset = Reset(OMEGA_WATER_WAVE64.replace(true));
+    translate(container)
+}
+
+/// Translates the vertex, pixel, compute or mesh program of a console
+'@)
+}
+Update-NvidiaSource 'crates/victory-gpu/src/shader_cache.rs' {
+    param($text)
+    $anchor = '    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());'
+    if (!$text.Contains($anchor)) { throw 'Could not find the NVIDIA runtime and preload shader translator.' }
+    $text.Replace('            "VICTORY_WAVE_WIDE",', "            `"VICTORY_WAVE_WIDE`",`n            `"VICTORY_OMEGA_WATER_WAVE64`",").Replace($anchor, @'
+    let translate = |c: &[u8]| {
+        static WATER: OnceLock<bool> = OnceLock::new();
+        let paired = *WATER.get_or_init(|| std::env::var_os("VICTORY_OMEGA_WATER_WAVE64").is_some_and(|v| v == "1"))
+            && victory_shader::emit::host_settings()[0] == 32
+            && matches!(&blake3::hash(c).to_hex()[..16], "926c46bab3b86bd6" | "a10179ab7eda0dc3" | "6871d6e4b3ac9a10");
+        if paired {
+            victory_shader::emit::translate_water_wave64(c)
+        } else {
+            victory_shader::emit::translate(c)
+        }.map_err(|e| e.to_string())
+    };
+'@)
+}
 Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
     param($text)
     $text = $text.Replace(
@@ -451,35 +489,7 @@ $launcherOptions = {
     }
 '@)
 }
-$omegaPlaySettings = {
-    param($text)
-    $text = & $launcherOptions $text
-    $text.Replace('    if !s.contains_key("VICTORY_WARMUP_RESTART")', '    if s.get("VICTORY_WARMUP_RESTART").is_some_and(|value| value != "0")')
-}
-Update-NvidiaSource 'apps/victory/src/play.rs' {
-    param($text)
-    $text = & $omegaPlaySettings $text
-    $args = '        format!("play {}{}", quoted(&exe), if o.no_framegen_ready { " --no-framegen-ready" } else { "" }),'
-    if (!$text.Contains($args)) { throw 'Could not find the NVIDIA restart arguments.' }
-    $text.Replace($args, @'
-        format!(
-            "play {}{}{}{}",
-            quoted(&exe),
-            if o.no_framegen_ready { " --no-framegen-ready" } else { "" },
-            if trainer_enabled { " --set VICTORY_OMEGA_TRAINER=1" } else { "" },
-            tuning_args,
-        ),
-'@).Replace('    s.insert("VICTORY_MENU_FILE".to_owned(),', @'
-    let trainer_enabled = s.get("VICTORY_OMEGA_TRAINER").is_some_and(|value| value == "1");
-    let mut tuning_args = String::new();
-    for name in ["VICTORY_WINDOWS_BAR_MB", "VICTORY_THIN_THREADS"] {
-        if let Some(value) = s.get(name).and_then(|value| value.parse::<u32>().ok()) {
-            tuning_args.push_str(&format!(" --set {name}={value}"));
-        }
-    }
-    s.insert("VICTORY_MENU_FILE".to_owned(),
-'@)
-} -Previous $omegaPlaySettings -PreviousHash 'FA5F79D50DBD7491B563666007F6598FC02FF97268378385166C70A514DB0B10'
+Update-NvidiaSource 'apps/victory/src/play.rs' $launcherOptions
 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'omega-scripthook-host.rs') -Destination (Join-Path $SourceDir 'apps/victory/src/omega_scripthook_host.rs')
 Update-NvidiaSource 'apps/victory/src/run.rs' {

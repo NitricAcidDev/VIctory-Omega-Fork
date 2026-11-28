@@ -58,7 +58,7 @@ For NVIDIA shader precompilation with the selected launch profile, add `-Preload
 
 **Water Light** starts off in Omega Launcher because the experimental tiled passes can cause dark or green blocks on NVIDIA. The F1 menu also offers **Transmission Only** to compare the base water shading with tiled local lighting disabled. Save and restart to apply it. [NVIDIA settings reference](docs/nvidia-settings.md)
 
-**Water Wave64** on Home is an opt-in experiment. PowerShell users can pass `-WaterWave64` to `play.ps1`. It opts three non-tiled water transmission shaders into paired-wave translation on 32-lane GPUs. It works with either renderer, and the NVIDIA F1 menu can change it for the next start. Compare the same daylight shoreline with it off and on.
+**Water Wave64** is on by default in the NVIDIA runner. A daylight gameplay check on the RTX 5060 Ti found that the water looked better with it enabled. Turn it off in the NVIDIA **F1** menu and restart to compare. The built-in runner exposes its own opt-in checkbox on Home. PowerShell users can pass `-WaterWave64` to `play.ps1`. The setting uses paired-wave translation for three non-tiled water shaders on 32-lane GPUs. **Water Light** still controls the tiled passes separately.
 
 ### ScriptHook VI trainer
 

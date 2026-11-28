@@ -146,10 +146,13 @@ if ($Nvidia) {
         VICTORY_WINDOW_KB = $(if ($LowMemory) { '2048' } else { '' })
         VICTORY_PANEL = $(if ($PerformanceLog) { '1' } else { '0' })
         VICTORY_OMEGA_AUDIO_TRACE = $(if ($AudioTrace) { '1' } else { '' })
-        VICTORY_OMEGA_WATER_WAVE64 = $(if ($WaterWave64) { '1' } else { '' })
+
         VICTORY_TEXTURE_CATCHUP = '1'
     }
 
+    if ($PSBoundParameters.ContainsKey('WaterWave64')) {
+        $options.VICTORY_OMEGA_WATER_WAVE64 = if ($WaterWave64) { '1' } else { '0' }
+    }
     $env:VICTORY_OMEGA_LAUNCH = ($options.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join [char]10
     $launch = @('play', $Exe, '--set', 'VICTORY_WARMUP_RESTART=0')
     if ($UnifiedTuning) {

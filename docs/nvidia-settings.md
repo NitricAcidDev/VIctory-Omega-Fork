@@ -25,7 +25,7 @@ selected options again when you start from the launcher.
 | Fog Cap | Limits the lighting fed into the fog estimate. |
 | Ray Tracing | Enables the experimental acceleration-structure and ray tracing path. |
 | Water Light | On 32-lane hardware, **Off** skips both experimental tiled water passes, **Transmission Only** runs the base transmission pass, and **Both Passes** also runs tiled local lighting. Save and restart to compare the tiles. The launcher's checkbox selects Off or Both Passes. |
-| Water Wave64 | Tries paired-wave lowering for three non-tiled water transmission shaders on 32-lane GPUs. Off by default. Restart to apply. |
+| Water Wave64 | Tries paired-wave lowering for three non-tiled water transmission shaders on 32-lane GPUs. On by default. Restart to apply. |
 | Heat Haze and Decal Defrag | **Left Out** skips both passes. Black road-sign markings have been reported in this mode. **Decals Only** runs decal atlas defragmentation while keeping heat haze off. Save and restart to compare the same sign. |
 | Early Depth Test | Allows supported translated pixel shaders to reject hidden pixels before shading. |
 | Skip Big Copy-Backs | Avoids some large GPU-to-CPU copies for write-combined memory. |

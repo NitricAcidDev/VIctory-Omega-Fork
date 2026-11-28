@@ -493,6 +493,7 @@ internal sealed class Launcher : Form
     private void RefreshStatus()
     {
         waterLight.Enabled = nvidia.Checked;
+        waterWave64.Visible = !nvidia.Checked;
 
         unifiedTuning.Enabled = nvidia.Checked && !memory.Checked;
         string? game = GamePath();
@@ -562,7 +563,7 @@ internal sealed class Launcher : Form
                 start.ArgumentList.Add("-FrameGeneration");
                 start.ArgumentList.Add(selection.FrameGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
-            if (selection.WaterWave64)
+            else if (selection.WaterWave64)
                 start.ArgumentList.Add("-WaterWave64");
             if (selection.RayTracing)
                 start.ArgumentList.Add("-RayTracing");

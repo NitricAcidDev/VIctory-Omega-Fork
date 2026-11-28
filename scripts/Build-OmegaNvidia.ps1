@@ -178,15 +178,20 @@ Update-NvidiaSource 'crates/victory-gpu/src/host/menu.rs' {
     $water = 'label: "WATER LIGHT", values: &[("", "ON"), ("0", "OFF")]'
     if (!$text.Contains($water)) { throw 'Could not find the NVIDIA Water Light setting.' }
     $text = $text -replace '(?m)^    // On unless "0":.*\n    // and both start it on,.*\n', ''
+    $text = $text.Replace('    std::env::var(var).unwrap_or_default()', @'
+    let value = std::env::var(var).unwrap_or_default();
+    if var == "VICTORY_OMEGA_WATER_WAVE64" && value.is_empty() { "1".to_owned() } else { value }
+'@)
     $text.Replace($water, 'label: "WATER LIGHT", values: &[("", "OFF"), ("base", "TRANSMISSION ONLY"), ("1", "BOTH PASSES")]').Replace(
         '    Item { var: "VICTORY_LEAVE_OUT",', @'
-    Item { var: "VICTORY_OMEGA_WATER_WAVE64", label: "WATER WAVE64", values: UNSET_ON, live: false },
+    Item { var: "VICTORY_OMEGA_WATER_WAVE64", label: "WATER WAVE64", values: &[("1", "ON"), ("0", "OFF")], live: false },
     Item { var: "VICTORY_LEAVE_OUT",
 '@)
 } -Previous $omegaGraphicsMenu -PreviousHash @(
     '99E2B322E28E3C6959631F2FD075FF0D4F238AEE183772168BE3D6926403278D',
     '91A2717E47DD1C717E6FF134181A7087BAE6A32F0FCA3035E58DE17D79A544DB',
-    'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C'
+    'DE032347BC0ADD20E740B2C86D4C2553305A5ACD1751024678BA38F3312A441C',
+    '169DE1BCA4A8735EF40C6D848A1B6300B10064C4AD140E2A7C0235E02A7723C7'
 )
 Update-NvidiaSource 'crates/victory-hle/src/modules/gameinput.rs' {
     param($text)
@@ -278,10 +283,28 @@ Update-NvidiaSource 'crates/victory-gpu/src/shader_cache.rs' {
     param($text)
     $anchor = '    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());'
     if (!$text.Contains($anchor)) { throw 'Could not find the NVIDIA runtime and preload shader translator.' }
-    $text.Replace('            "VICTORY_WAVE_WIDE",', "            `"VICTORY_WAVE_WIDE`",`n            `"VICTORY_OMEGA_WATER_WAVE64`",").Replace($anchor, @'
+    $fingerprint = @"
+            if let Some(value) = std::env::var_os(name) {
+                bytes.extend_from_slice(value.as_encoded_bytes());
+            }
+"@
+    $text.Replace('            "VICTORY_WAVE_WIDE",', "            `"VICTORY_WAVE_WIDE`",`n            `"VICTORY_OMEGA_WATER_WAVE64`",").Replace(
+        $fingerprint, @"
+            if name == "VICTORY_OMEGA_WATER_WAVE64" {
+                bytes.push(if water_wave64() { b'1' } else { b'0' });
+            } else if let Some(value) = std::env::var_os(name) {
+                bytes.extend_from_slice(value.as_encoded_bytes());
+            }
+"@).Replace('static CACHE: OnceLock<Cache> = OnceLock::new();', @"
+fn water_wave64() -> bool {
+    static WATER: OnceLock<bool> = OnceLock::new();
+    *WATER.get_or_init(|| std::env::var_os("VICTORY_OMEGA_WATER_WAVE64").is_none_or(|v| v != "0"))
+}
+
+static CACHE: OnceLock<Cache> = OnceLock::new();
+"@).Replace($anchor, @"
     let translate = |c: &[u8]| {
-        static WATER: OnceLock<bool> = OnceLock::new();
-        let paired = *WATER.get_or_init(|| std::env::var_os("VICTORY_OMEGA_WATER_WAVE64").is_some_and(|v| v == "1"))
+        let paired = water_wave64()
             && victory_shader::emit::host_settings()[0] == 32
             && matches!(&blake3::hash(c).to_hex()[..16], "926c46bab3b86bd6" | "a10179ab7eda0dc3" | "6871d6e4b3ac9a10");
         if paired {
@@ -290,8 +313,8 @@ Update-NvidiaSource 'crates/victory-gpu/src/shader_cache.rs' {
             victory_shader::emit::translate(c)
         }.map_err(|e| e.to_string())
     };
-'@)
-}
+"@)
+} -PreviousHash '429E7DA40D706B1AA0AFACB42DF70B64C701CEA3FB54C4F70D50BF66CEDBEC00'
 Update-NvidiaSource 'crates/victory-gpu/src/frame.rs' {
     param($text)
     $text = $text.Replace(

@@ -40,6 +40,7 @@ internal sealed class Launcher : Form
     private readonly CheckBox diagnostics = new DarkCheckBox();
     private readonly CheckBox audioTrace = new DarkCheckBox();
     private readonly CheckBox waterLight = new DarkCheckBox();
+    private readonly CheckBox waterWave64 = new DarkCheckBox();
     private readonly CheckBox unifiedTuning = new DarkCheckBox();
     private readonly CheckBox trainer = new DarkCheckBox();
     private readonly Label trainerStatus = new();
@@ -96,6 +97,7 @@ internal sealed class Launcher : Form
         frameLimit.SelectedIndex = Math.Max(0, Array.IndexOf(FrameLimits, saved.FrameLimit));
         audioTrace.Checked = saved.AudioTrace;
         waterLight.Checked = saved.WaterLight;
+        waterWave64.Checked = saved.WaterWave64;
         unifiedTuning.Checked = saved.UnifiedTuning;
         trainer.Checked = saved.Trainer;
         nvidia.Checked = saved.Nvidia && NvidiaInstalled;
@@ -256,22 +258,23 @@ internal sealed class Launcher : Form
         card.SetColumnSpan(title, 2);
         var options = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2, Margin = Padding.Empty
+            Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 3, Margin = Padding.Empty
         };
         for (int column = 0; column < options.ColumnCount; column++)
             options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / options.ColumnCount));
-        options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        for (int row = 0; row < options.RowCount; row++)
+            options.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / options.RowCount));
         var choices = new[] {
             (original, "Original graphics"), (shadowBoost, "Shadow boost"), (memory, "Low-memory mode"),
-            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing"), (waterLight, "Water Light") };
+            (diagnostics, "FPS HUD and logs"), (audioTrace, "Audio tracing"), (waterLight, "Water Light"),
+            (waterWave64, "Water Wave64") };
         waterLight.AccessibleDescription = "Enables experimental NVIDIA water lighting. May cause dark or green water tiles.";
+        waterWave64.AccessibleDescription = "Tests paired-wave translation for non-tiled water lighting in the built-in runner.";
         for (int index = 0; index < choices.Length; index++)
         {
             var (check, label) = choices[index];
             check.Text = label;
-            check.AutoSize = true;
-            check.Anchor = AnchorStyles.Left;
+            check.Dock = DockStyle.Fill;
             options.Controls.Add(check, index % options.ColumnCount, index / options.ColumnCount);
         }
         card.Controls.Add(options, 0, 1);
@@ -290,11 +293,11 @@ internal sealed class Launcher : Form
 
         nvidia.Text = NvidiaInstalled ? "Use NVIDIA runner (F1 graphics menu)" : "NVIDIA runner is not installed";
         nvidia.Enabled = NvidiaInstalled;
-        nvidia.AutoSize = true;
+        nvidia.Dock = DockStyle.Fill;
         card.Controls.Add(nvidia, 0, 0);
         card.SetColumnSpan(nvidia, 2);
         unifiedTuning.Text = "Unified tuning";
-        unifiedTuning.AutoSize = true;
+        unifiedTuning.Dock = DockStyle.Fill;
         unifiedTuning.AccessibleDescription = "Use six graphics recording workers and up to 1 GiB of Resizable BAR upload memory.";
         card.Controls.Add(unifiedTuning, 2, 0);
 
@@ -490,6 +493,7 @@ internal sealed class Launcher : Form
     private void RefreshStatus()
     {
         waterLight.Enabled = nvidia.Checked;
+        waterWave64.Enabled = !nvidia.Checked;
         unifiedTuning.Enabled = nvidia.Checked && !memory.Checked;
         string? game = GamePath();
         string? gameDirectory = game is null ? null : Path.GetDirectoryName(game);
@@ -558,6 +562,8 @@ internal sealed class Launcher : Form
                 start.ArgumentList.Add("-FrameGeneration");
                 start.ArgumentList.Add(selection.FrameGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
+            else if (selection.WaterWave64)
+                start.ArgumentList.Add("-WaterWave64");
             if (selection.RayTracing)
                 start.ArgumentList.Add("-RayTracing");
             if (selection.OriginalGraphics) start.ArgumentList.Add("-OriginalGraphics");
@@ -660,7 +666,7 @@ internal sealed class Launcher : Form
         original.Checked, memory.Checked, diagnostics.Checked, shadowBoost.Checked,
         FrameLimits[frameLimit.SelectedIndex], audioTrace.Checked, nvidia.Checked,
         DlssModes[dlss.SelectedIndex], FrameMultipliers[frameGeneration.SelectedIndex],
-        waterLight.Checked, unifiedTuning.Checked, trainer.Checked);
+        waterLight.Checked, unifiedTuning.Checked, trainer.Checked, waterWave64.Checked);
 
     private void SaveSettings(Settings selection)
     {
@@ -710,5 +716,6 @@ internal sealed class Launcher : Form
     private sealed record Settings(string? Folder = null, bool SeriesX = false, bool RayTracing = false,
         bool OriginalGraphics = false, bool LowMemory = false, bool Diagnostics = false, bool ShadowBoost = false,
         string? FrameLimit = null, bool AudioTrace = false, bool Nvidia = false, string? Dlss = null,
-        int FrameGeneration = 0, bool WaterLight = false, bool UnifiedTuning = false, bool Trainer = false);
+        int FrameGeneration = 0, bool WaterLight = false, bool UnifiedTuning = false, bool Trainer = false,
+        bool WaterWave64 = false);
 }

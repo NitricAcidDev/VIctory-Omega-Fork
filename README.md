@@ -58,6 +58,8 @@ For NVIDIA shader precompilation with the selected launch profile, add `-Preload
 
 **Water Light** starts off in Omega Launcher because the experimental tiled passes can cause dark or green blocks on NVIDIA. The F1 menu also offers **Transmission Only** to compare the base water shading with tiled local lighting disabled. Save and restart to apply it. [NVIDIA settings reference](docs/nvidia-settings.md)
 
+**Water Wave64** on Home is an opt-in experiment in the built-in runner. Clear **Use NVIDIA runner** to select it, or pass `-WaterWave64` to `play.ps1`. It tests paired-wave translation on three non-tiled water shaders. Compare the same daylight shoreline with it off and on.
+
 ### ScriptHook VI trainer
 
 Install CMake 3.24 or newer and the Visual Studio C++ build tools with MASM. Build the NVIDIA runner and install the trainer beside your Xbox game executable:

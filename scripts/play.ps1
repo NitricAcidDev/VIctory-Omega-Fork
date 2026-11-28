@@ -20,6 +20,7 @@ param(
     [switch]$AudioTrace,
     [switch]$Nvidia,
     [switch]$WaterLight,
+    [switch]$WaterWave64,
     [switch]$PreloadShaders,
     [switch]$UnifiedTuning,
     [switch]$Trainer,
@@ -33,6 +34,9 @@ param(
 )
 if (!$Nvidia -and ($WaterLight -or $PreloadShaders -or $UnifiedTuning -or $Trainer)) {
     throw 'Water Light, shader preload, Unified tuning and the trainer require -Nvidia.'
+}
+if ($Nvidia -and $WaterWave64) {
+    throw 'The Water Wave64 experiment requires the built-in runner.'
 }
 if ($UnifiedTuning -and $LowMemory) {
     throw 'Unified tuning adds a GPU memory budget. Turn off Low-memory mode to use it.'
@@ -65,6 +69,7 @@ if ($AudioTrace) {
     $settings.VICTORY_LOG = "$log,victory_hle::modules::audio=debug,victory_hle::modules::audio::capture=warn,victory_hle::modules::apu=debug"
 }
 if ($FrameLimit) { $settings.VICTORY_FPS_LIMIT = $FrameLimit }
+if ($WaterWave64) { $settings.VICTORY_WAVE_WIDE_ONLY = 'water-base' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = if ($Nvidia) {

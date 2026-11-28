@@ -342,12 +342,23 @@ internal sealed class Launcher : Form
 
     private sealed class DarkCheckBox : CheckBox
     {
+        private const TextFormatFlags LabelFlags =
+            TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+        private int GlyphSize => 13 * DeviceDpi / 96;
+        private int LabelLeft => 1 + GlyphSize + 5 * DeviceDpi / 96;
+
         public DarkCheckBox() => FlatStyle = FlatStyle.Flat;
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            var label = TextRenderer.MeasureText(Text, Font, Size.Empty, LabelFlags);
+            return new Size(LabelLeft + label.Width, Math.Max(GlyphSize + 2, label.Height));
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.Clear(BackColor);
-            int glyph = 13 * DeviceDpi / 96;
+            int glyph = GlyphSize;
             var box = new Rectangle(1, (ClientSize.Height - glyph) / 2, glyph, glyph);
             using var fill = new SolidBrush(Checked && Enabled ? Selected : Input);
             using var border = new Pen(Focused && Enabled ? Accent : Muted);
@@ -362,10 +373,8 @@ internal sealed class Launcher : Form
                     new(box.Left + glyph * 3 / 4, box.Top + glyph / 4)
                 });
             }
-            int labelLeft = box.Right + 5 * DeviceDpi / 96;
-            var label = new Rectangle(labelLeft, 0, Math.Max(0, ClientSize.Width - labelLeft), ClientSize.Height);
-            TextRenderer.DrawText(e.Graphics, Text, Font, label, Enabled ? Ink : Muted,
-                TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            var label = new Rectangle(LabelLeft, 0, Math.Max(0, ClientSize.Width - LabelLeft), ClientSize.Height);
+            TextRenderer.DrawText(e.Graphics, Text, Font, label, Enabled ? Ink : Muted, LabelFlags);
             if (Focused && ShowFocusCues)
                 ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle);
         }
